@@ -8,7 +8,7 @@ from test_regional_retrieval import model_fixture, results
 from warp.advisor.features import RegionFeatureExtractor
 from warp.advisor.probe import RegionProber
 from warp.audit import audit_scope, emit
-from warp.graph.hipporag2 import HippoRAG2GraphBuilder
+from warp.graph.hipporag2 import HippoRAG2Config, HippoRAG2GraphBuilder
 from warp.models import Query, Region, RegionFeatures
 
 
@@ -81,7 +81,8 @@ class LocalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "events.jsonl"
             llm = types.SimpleNamespace(infer=lambda *args, **kwargs: ("raw answer", {"prompt_tokens": 2, "completion_tokens": 1}, False))
-            tracker = HippoRAG2GraphBuilder._wrap_llm(llm)
+            builder = HippoRAG2GraphBuilder(HippoRAG2Config())
+            tracker = builder._wrap_llm(llm)
             tracker.phase = "construction"
             tracker.audit_context = {"path": str(path), "region_id": "r0"}
             llm.infer([{"role": "user", "content": "raw prompt"}], api_key="DO_NOT_STORE")
@@ -89,6 +90,12 @@ class LocalFeatureTests(unittest.TestCase):
             self.assertNotIn("DO_NOT_STORE", rendered)
             self.assertEqual(json.loads(rendered)["payload"]["response"], "raw answer")
             self.assertEqual(tracker.get("construction")["physical_input_tokens"], 2)
+            captured = {}
+            thinking_llm = types.SimpleNamespace(infer=lambda *args, **kwargs: captured.update(kwargs) or ("ok", {"prompt_tokens": 1, "completion_tokens": 0}, False))
+            HippoRAG2GraphBuilder(HippoRAG2Config(disable_llm_thinking=True))._wrap_llm(thinking_llm)
+            thinking_llm.infer([])
+            self.assertEqual(captured["extra_body"]["thinking"], {"type": "disabled"})
+            self.assertFalse(captured["extra_body"]["enable_thinking"])
             with audit_scope(path=str(path), method="warp"):
                 emit("test", {"value": 1})
             self.assertEqual(len(path.read_text().splitlines()), 2)

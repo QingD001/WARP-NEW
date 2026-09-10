@@ -1,7 +1,7 @@
 dataset:
-  name: hotpotqa
-  corpus: data/processed/hotpotqa/corpus.jsonl
-  queries: data/processed/hotpotqa/queries.jsonl
+  name: nq
+  corpus: /root/data/warp-g/data/processed/nq/corpus.jsonl
+  queries: /root/data/warp-g/data/processed/nq/queries.jsonl
 warp:
   retrieval_k: 10
   candidate_k: 50
@@ -13,15 +13,15 @@ warp:
   probe_max_queries: 64
   probe_budget_fraction: 0.1
   gain_prior_queries: 16.0
-  benefit_objective: evidence_recall
+  benefit_objective: mixed
   complete_weight: 0.5
-  selection_mode: independent
+  selection_mode: conditional
   conditional_max_queries: 32
   conditional_candidates: 6
   conditional_pairs: 6
   conditional_rounds: 3
   conditional_max_evaluations: 16
-  retrieval_steps: 1
+  retrieval_steps: 2
   feedback_docs: 2
   feedback_chars: 400
   dispersion_pairs: 4096
@@ -29,8 +29,10 @@ warp:
   partition_mode: combined
   min_region_size: 5
   seed: 42
+  retrieval_ks: [2, 3, 5, 10]
+  multistep_max_steps: 3
 graph:
-  artifact_root: outputs/indexes/hotpotqa
+  artifact_root: /root/data/warp-g/outputs/indexes/nq
   llm_name: deepseek-v4-flash
   llm_base_url: https://yibuapi.com/v1
   disable_llm_thinking: true
@@ -45,7 +47,7 @@ graph:
   synonymy_edge_sim_threshold: 0.8
   graph_type: facts_and_sim_passage_node_unidirectional
   input_usd_per_million_tokens: 0.15
-  output_usd_per_million_tokens: 0.6
+  output_usd_per_million_tokens: 0.60
 reranker:
   model_name: BAAI/bge-reranker-v2-m3
   revision: b5160aeac3c6c8fe7beaaaf04c9e0142826b58d1
@@ -66,7 +68,10 @@ experiment:
   seed: 42
   randomization_samples: 10000
   partition_ablations:
-    modes: []
+    modes:
+    - query
+    - semantic
+    - random
     seed: 42
 reader:
   enabled: true

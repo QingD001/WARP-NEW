@@ -45,12 +45,20 @@ class ConditionalAndMultistepTests(unittest.TestCase):
 
     def test_pair_escapes_zero_singleton_and_selection_cache_avoids_reruns(self):
         model, calls = self.pair_model()
-        self.assertEqual(model.select(2 / 3), ["r0", "r1"])
+        self.assertEqual(model.select("warp"), ["r0", "r1"])
         self.assertEqual(len(calls), 4)  # Base, two singletons, their pair
-        self.assertEqual(model.select(2 / 3), ["r0", "r1"])
+        self.assertEqual(model.select("warp"), ["r0", "r1"])
         self.assertEqual(len(calls), 4)
-        self.assertEqual(model.select(1 / 3), [])
         self.assertTrue(all("r2" not in call for call in calls))
+
+    def test_conditional_controls_match_actual_warp_count_not_independent_score(self):
+        model, _ = self.pair_model()
+        warp = model.select("warp")
+        self.assertEqual(warp, ["r0", "r1"])
+        independent = model.selector.select("warp", model.features, model.costs, model.estimated_gains)
+        self.assertEqual(independent, [])
+        for method in ("random_region", "frequency_only", "gain_only", "cost_only"):
+            self.assertEqual(len(model.select(method)), len(warp))
 
     def test_evaluation_cap_and_negative_marginals(self):
         model, calls = self.pair_model()
@@ -63,14 +71,13 @@ class ConditionalAndMultistepTests(unittest.TestCase):
         model.search = lambda query, k, selected: results(["x0", "x1"] if not selected else ["a0", "a1"])
         self.assertEqual(select_conditional(model, 2)[0], [])
 
-    def test_conditional_calls_charged_only_to_matching_warp_budget(self):
+    def test_conditional_calls_charged_only_to_warp_design(self):
         model = model_fixture()
         model.design_retrieval_usage = {"logical_input_tokens": 10}
-        model.selection_reports = {"0.2": {"retrieval_usage": {"logical_input_tokens": 90}}}
-        self.assertEqual(_probe_design_costs(model, "warp", [], {}, .2)[0].input_tokens, 100)
-        self.assertEqual(_probe_design_costs(model, "gain_only", [], {}, .2)[0].input_tokens, 10)
-        self.assertEqual(_probe_design_costs(model, "warp", [], {}, .1)[0].input_tokens, 10)
-        self.assertEqual(_probe_design_costs(model, "random_region", [], {}, .2)[0].input_tokens, 0)
+        model.selection_reports = {"full_pipeline": {"retrieval_usage": {"logical_input_tokens": 90}}}
+        self.assertEqual(_probe_design_costs(model, "warp", [], {})[0].input_tokens, 100)
+        self.assertEqual(_probe_design_costs(model, "gain_only", [], {})[0].input_tokens, 10)
+        self.assertEqual(_probe_design_costs(model, "random_region", [], {})[0].input_tokens, 0)
 
     def test_feedback_discovers_second_hop_and_reranks_original_question(self):
         calls, rerank_queries = [], []
@@ -157,12 +164,13 @@ class ConditionalAndMultistepTests(unittest.TestCase):
         for probe in model.probes.values():
             self.assertAlmostEqual(probe.gain, .5 * probe.recall_gain + .5 * probe.complete_gain)
             self.assertIn("utility_gain", probe.per_query[0])
-        model.select(2 / 3)
-        self.assertIn(str(float(2 / 3)), model.report()["conditional_selection"])
+        model.select("warp")
+        self.assertIn("full_pipeline", model.report()["conditional_selection"])
 
     def test_config_rejects_unbounded_or_invalid_settings(self):
         model = model_fixture()
         for kwargs in ({"conditional_max_evaluations": 0}, {"retrieval_steps": 0},
-                       {"complete_weight": 2}, {"benefit_objective": "unknown"}):
+                       {"complete_weight": 2}, {"benefit_objective": "unknown"},
+                       {"multistep_max_steps": -1}):
             with self.assertRaises(ValueError):
                 replace(model.config, **kwargs)

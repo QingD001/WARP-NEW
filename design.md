@@ -5,21 +5,17 @@
 WARP-G 研究共享语料上的 workload-aware regional graph materialization。所有方法拥有完全相同的
 BM25、NV-Embed-v2 和 CrossEncoder。昂贵的 HippoRAG2 图是附加物理结构，不是基础数据库。
 
-给定 corpus regions `R`、历史设计 workload `Q_train`、构建预算 `B` 和检索指标 `M`，目标是选择：
-
-```text
-S ⊆ R,  Σ(i∈S) construction_cost(i) ≤ B
-```
-
-使 held-out workload 上的 `E[M(q; S)]` 最大。论文只研究同一种 Graph representation 应该在哪些
-regions 物化，不引入 Tree、Summary、Agent、RL 或在线更新。
+给定 corpus regions `R`、历史设计 workload `Q_train` 和检索指标 `M`，WARP 按方法自身规则选出
+物化集合 `S ⊆ R`（独立模式 `score>0` 自然停，条件模式边际 gain>0 自然停），**不施加部署 token 预算**。
+实验比较各方法完整 pipeline 的 `E[M(q; S)]` 与实际消耗 tokens。论文仍研究同一种 Graph representation
+应该在哪些 regions 物化，不引入 Tree、Summary、Agent、RL 或在线更新。
 
 研究问题固定为：
 
 - RQ1：HippoRAG2 相对 Base 的收益是否在 corpus regions 之间显著不均匀？
-- RQ2：能否根据构图前可获得的 supervised workload/corpus features 预测区域收益？
-- RQ3：在相同构建预算下，WARP-G 是否优于 KET-RAG、G2ConS 和四个 region-selection controls，
-  并以更低成本接近 Full Graph？
+- RQ2：仅使用探测区实测收益（不对未探测区域外推）时，条件边际选区是否优于独立 score 排序与个数对齐对照？
+- RQ3：在各自完整 pipeline 下，WARP-G 是否优于个数对齐的四个 region-selection controls、原生 core
+  比例的 KET-RAG/G2ConS，并以更低实际构图 tokens 接近 Full Graph？
 - RQ4：收益排序对 partition method 的变化是否稳定，query routing 对系统上限有多大影响？
 - RQ5：construction savings 是否会被策略搜索成本或在线区域图调用抵消？
 
@@ -28,7 +24,7 @@ regions 物化，不引入 Tree、Summary、Agent、RL 或在线更新。
 每个数据集使用 HippoRAG2 官方发布的共享 corpus 和完整 1,000 条 query。所有配置在正式运行前冻结，
 不使用 query 自动调参。固定 `seed=42` 做五折交叉拟合：
 
-- 每折 800 条 design query 用于 partition、features、probe labels、predictor 和 materialization selection；
+- 每折 800 条 design query 用于 partition、features、probe labels 和 materialization selection；
 - 另 200 条 held-out query 只用于 retrieval、reader 和 routing evaluation；
 - 五折分别重新执行完整 physical-design 流程；
 - 每条 query 恰好作为一次 held-out test，最终统计在合并后的 1,000 条逐题结果上计算。
@@ -48,7 +44,7 @@ BM25 + NV-Embed-v2 -> RRF -> pinned BGE CrossEncoder -> top-k
 ```
 
 Base、区域 probe、WARP、corpus-level baselines 和 Full Graph 使用相同 `candidate_k`、RRF、reranker
-和最终 `k`。因此零图预算下，每个选择方法严格退化为同一个 Base，不会把 reranker 收益误记成图收益。
+和最终 `k`。因此不部署任何区域图时，每个选择方法严格退化为同一个 Base，不会把 reranker 收益误记成图收益。
 
 ## 4. Workload-aware partition
 
@@ -79,40 +75,34 @@ region size multiset 下随机分配文档。Embedding dispersion 只采样固�
 - `embedding_dispersion`；
 - `coaccess_density`。
 
-论文直接报告 feature leave-one-out ablation、LightGBM feature importance 和 probe learning curve。
+构图前特征只用于探测优先级和报告，不训练回归器去预测未探测区域。
 
-## 6. Probe labels 与 predictor
+## 6. Probe labels 与选择信号
 
-Probe regions 沿 workload density、cost 和 failure 轴分层抽取，且至少包含六个有 workload 覆盖的
-regions。每个 probe graph 使用正式 HippoRAG2 构建。
+Probe regions 从有 workload 覆盖的区域中按局部缺失证据/成本排序，并穿插随机探索；数量约为覆盖区域的 20%（至少一个），累计估算建图成本不超过全图估算成本的 10%。每个 probe graph 使用正式 HippoRAG2 构建。
 
-标签走与最终系统完全一致的 candidate generation、RRF 和 CrossEncoder。主要目标为：
-
-```text
-y_i = mean_q [CompleteEvidence@10(Base + Graph_i) - CompleteEvidence@10(Base)]
-```
-
-同时保存普通 evidence recall gain。LightGBM 只使用 probe labels 拟合；已观测 label 覆盖对应区域
-预测。对 probe regions 做 leave-one-region-out，报告 MAE、RMSE、Spearman 和逐区域预测。
-
-区域图集合的真实效用不被假设为严格可加。代码对 probe region pairs 直接测量：
+标签走与最终系统完全一致的 candidate generation、RRF 和 CrossEncoder。paper 默认设计目标为混合效用
 
 ```text
-interaction(i,j) = U({i,j}) - U({i}) - U({j}) + U(∅)
+U = (1 - complete_weight) * EvidenceRecall + complete_weight * CompleteEvidence
 ```
 
-主论文报告交互分布。如果交互不可忽略，论文只能把独立 gain 排序描述为可部署近似，不能声称求解了
-一般集合效用最优化。
+`complete_weight=0.5`。同时保存 Evidence Recall 与 Complete Evidence 的增益。标签是整题证据上的净变化，允许为负。
+
+对探测区做 `estimated_gain = n * g / (n + 16)` 向零收缩。未探测区域不外推，估计值为 0，报告中标记为 unprobed。不对未探测区域训练回归器。
+
+区域图集合的真实效用不被假设为严格可加。paper 默认 `interaction_pairs=0`，不把二阶交互作为主表。条件选区在探测区内直接测量单区与有限双区组合的边际增益，作为对独立可加假设的运行时替代。
 
 ## 7. WARP selection 与 baselines
 
-WARP score：
+独立模式 WARP score：
 
 ```text
-score_i = query_freq_i × max(predicted_gain_i, 0) / estimated_graph_cost_i
+score_i = query_freq_i × max(estimated_gain_i, 0) / estimated_graph_cost_i
 ```
 
-区域不可拆分，按 score 选择且不超过 estimated graph budget。
+区域不可拆分。独立模式选出全部 `score_i>0` 的区域后停止；条件模式按实测边际 gain>0 停止。
+两者都不再用 token proxy 做部署截断。四个 control 只换排序公式，并取与 WARP 相同的区域个数。
 
 正式比较方法：
 
@@ -127,13 +117,13 @@ score_i = query_freq_i × max(predicted_gain_i, 0) / estimated_graph_cost_i
 - Base + corpus-wide Full HippoRAG2。
 
 KET-RAG 与 G2ConS 的昂贵 KG 都使用与 WARP 相同的 HippoRAG2 builder，避免 Graph backend 能力差异。
-它们的 keyword/concept index embedding、时间、节点、边和存储全部计入成本；轻量结构先占用同一 token
-proxy 预算，只有剩余部分可用于 core KG。预算不足以构造该结构时，对应点就是共享 Base。
+它们按各自论文的文档比例选取 core（正式配置 `ket_core_fraction`/`g2_core_fraction`=0.8），不再套用
+WARP 的 token 预算；轻量 keyword/concept 结构始终计入 deployment cost。
 
 四个 region-selection controls 是 selector ablation，不是四套独立构图系统：它们复用同一折已经完成的 WARP
-physical-design state，只替换最后的区域排序公式。LinearRAG 与 LightRAG 另用锁定的作者官方仓库，在相同完整
-corpus 和 1,000 queries 上运行独立 end-to-end 表；由于构图单元和成本维度不相同，不强行映射到本节 token-proxy
-预算曲线。完整方法差异、官方代码状态和 commit 见 `related_work.md` 与 `configs/official_baselines.yaml`。
+physical-design state，只替换最后的区域排序公式，并对齐 WARP 的选区个数。LinearRAG 与 LightRAG 另用锁定的作者官方仓库，在相同完整
+corpus 和 1,000 queries 上运行独立 end-to-end 表；由于构图单元和成本维度不相同，不强行映射到本节实际 token 主表。
+完整方法差异、官方代码状态和 commit 见 `related_work.md` 与 `configs/official_baselines.yaml`。
 
 ## 8. Query routing
 
@@ -146,25 +136,29 @@ Test query 先运行 Base，取 top-`routing_k` 文档并查表得到 regions。
 成本严格分账：
 
 1. `deployment_cost`：最终保留图及 KET/G2ConS 轻量结构的冷构建成本；
-2. `design_search_cost`：WARP/benefit predictor 获得 probe labels 的图构建成本；
-3. `method_specific_design_wall_seconds`：partition、feature、predictor 等非图设计时间；
+2. `design_search_cost`：WARP 获得 probe labels 与条件选区测量的图构建/检索成本；
+3. `method_specific_design_wall_seconds`：partition、feature 等非图设计时间；
 4. `first_run_cost`：deployment + 方法专属 design cost；
-5. `online_retrieval_cost`：每个 method/budget/trial 独立的 query-time tokens、calls 和 wall time。
+5. `online_retrieval_cost`：每个 method/trial 独立的 query-time tokens、calls 和 wall time。
 
 原始维度包括 LLM input/output tokens、embedding tokens、wall time、nodes、edges、storage 和按配置中
-固定价格快照计算的 USD。不同 token 类型不会只以单一总数呈现；token sum 仅作为预构建预算 proxy。
+固定价格快照计算的 USD。主报这些实测 tokens 以及 CE@10 / tokens 的 token efficiency。
+相对 Full Graph 的 `actual_cost_fraction` 只作描述，不是选择时的截断约束。
+探测阶段仍可用 `probe_budget_fraction` 限制试建区域的文本 proxy，与部署选择无关。
 
 ## 10. 评价与统计
 
-Retrieval 指标：Evidence Recall@5/10、Complete Evidence@5/10。Reader 固定为同一 HippoRAG2 QA LLM，
-报告 Answer EM/F1。
+Retrieval 指标：Evidence Recall 与 Complete Evidence 统一报告 **@2 / @3 / @5 / @10**。
+主路径检索与 Reader 使用第一遍结果；IRCoT 多步是另开的对照，不覆盖问答缓存。
+Reader 固定为同一 HippoRAG2 QA LLM
+（正式配置为 `deepseek-v4-flash`），报告 Answer EM/F1；Reader 复用该方法那一轮检索的文档，不另设预算档。
 
-预算为 `{0, 0.1, 0.2, 0.4, 0.6, 1.0}` × Full Graph token proxy。全部正式实验固定 `seed=42`。
-每个方法通过 query-level paired bootstrap 报告 95% CI。WARP 与所有同预算 baselines 做 paired
+每个方法只跑一轮完整 pipeline。全部正式实验固定 `seed=42`。
+每个方法通过 query-level paired bootstrap 报告 95% CI。WARP 与所有参考方法做 paired
 randomization test，并对同一指标的比较应用 Holm correction。
 
-主图使用实际 deployment cost，而不是 requested proxy budget。另画 first-run cost 和 online cost，
-并报告按实际 deployment cost 积分的 quality-cost AUC。
+主表同时给出实际 deployment / first-run / online tokens 与 token efficiency。不再扫描
+`{0, 0.1, 0.2, 0.4, 0.6, 1.0}` 预算点，也不把 quality-cost AUC 作为主结论。
 
 ## 11. 可复现性
 

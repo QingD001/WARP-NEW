@@ -94,16 +94,17 @@ def audit_artifact(artifact: dict[str, Any], candidate: str, reference: str, k: 
     for row in artifact["quality_cost_curve"]:
         if row["method"] not in {candidate, reference}:
             continue
-        key = (row.get("design_seed"), row.get("fold"), row["budget_fraction"])
+        key = (row.get("design_seed"), row.get("fold"),
+               row.get("selection") or row.get("budget_fraction", "full_pipeline"))
         group = groups.setdefault(key, {})
         if row["method"] in group:
             raise ValueError(f"Duplicate method trial: {key}, {row['method']}")
         group[row["method"]] = row
     output = []
-    for (seed, fold, budget), group in groups.items():
+    for (seed, fold, selection), group in groups.items():
         if candidate not in group or reference not in group:
-            raise ValueError(f"Missing comparison method at seed={seed}, fold={fold}, budget={budget}")
-        output.append({"design_seed": seed, "fold": fold, "budget_fraction": budget,
+            raise ValueError(f"Missing comparison method at seed={seed}, fold={fold}, selection={selection}")
+        output.append({"design_seed": seed, "fold": fold, "selection": selection,
                        **compare_rows(group[candidate], group[reference], k)})
     if not output:
         raise ValueError("No matching regional method trials in quality_cost_curve")

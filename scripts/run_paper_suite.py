@@ -18,6 +18,8 @@ def main() -> None:
     parser.add_argument("--config-dir", type=Path, default=Path("configs/paper"))
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/paper"))
     parser.add_argument("--datasets", nargs="*", default=["hotpotqa", "2wiki", "musique", "popqa"])
+    parser.add_argument("--max-folds", type=int, default=None,
+                        help="Forwarded to warp.run; yaml still defines the full fold split")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for dataset in args.datasets:
@@ -25,9 +27,12 @@ def main() -> None:
         if not config.exists():
             raise FileNotFoundError(config)
         output = args.output_dir / f"{dataset}.json"
-        subprocess.run([
+        command = [
             sys.executable, "-m", "warp.run", "--config", str(config), "--output", str(output),
-        ], check=True)
+        ]
+        if args.max_folds is not None:
+            command.extend(["--max-folds", str(args.max_folds)])
+        subprocess.run(command, check=True)
 
 
 if __name__ == "__main__":

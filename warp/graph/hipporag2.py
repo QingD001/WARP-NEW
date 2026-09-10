@@ -36,6 +36,7 @@ class HippoRAG2Config:
     dataset: str | None = None
     llm_name: str = "gpt-4o-mini"
     llm_base_url: str | None = "https://api.openai.com/v1"
+    disable_llm_thinking: bool = False
     embedding_model_name: str = "nvidia/NV-Embed-v2"
     embedding_base_url: str | None = None
     azure_endpoint: str | None = None
@@ -164,13 +165,18 @@ class HippoRAG2GraphBuilder:
         encoder = tiktoken.get_encoding("cl100k_base")
         return sum(len(encoder.encode(text)) for text in texts)
 
-    @staticmethod
-    def _wrap_llm(llm: Any) -> _UsageTracker:
+    def _wrap_llm(self, llm: Any) -> _UsageTracker:
         tracker = _UsageTracker()
         original = llm.infer
+        disable_thinking = bool(self.config.disable_llm_thinking)
 
         def counted_infer(*args: Any, **kwargs: Any) -> Any:
             """透明转发 infer，并从官方 metadata/cache flag 读取 token。"""
+            if disable_thinking:
+                extra = dict(kwargs.get("extra_body") or {})
+                extra.setdefault("thinking", {"type": "disabled"})
+                extra.setdefault("enable_thinking", False)
+                kwargs = {**kwargs, "extra_body": extra}
             result = original(*args, **kwargs)
             if not isinstance(result, tuple) or len(result) < 3 or not isinstance(result[1], dict):
                 raise RuntimeError(

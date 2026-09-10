@@ -1,10 +1,11 @@
 # WARP-G
 
 WARP-G 是一个面向科研实验的 workload-aware regional graph materialization 系统。它在共享语料上先建立
-BM25 + NV-Embed-v2 基础检索，再根据训练 workload 把文档划分为 regions，少量构建 HippoRAG2 probe graph，
-在独立探测预算内实测 region 的构图收益，最后在预算约束下只物化最值得构建的区域图。
+BM25 + NV-Embed-v2 基础检索，再根据训练 workload 把文档划分为 regions，在独立探测构图 proxy 内实测
+region 的构图收益，再按方法自身规则选出要物化的区域图。部署阶段不再施加 token 预算截断；主表比较各方法
+完整 pipeline 的检索质量与实际消耗 tokens。区域选择对照对齐 WARP 选出的区域个数，而不是同一 token 预算。
 
-正式实验固定使用 `seed=42`。主预算曲线比较 KET-RAG、G2ConS、Random-region、Frequency-only、Gain-only、
+正式实验固定使用 `seed=42`。主表比较 KET-RAG、G2ConS、Random-region、Frequency-only、Gain-only、
 Cost-only 和 WARP-G；BM25、Dense、Hybrid、HippoRAG2 graph-only 和 Base + Full Graph 作为标准参考方法。
 LinearRAG 与 LightRAG 使用锁定的作者官方实现运行独立端到端对照。详细研究假设与评测口径见
 [design.md](design.md)，所有已讨论工作的介绍、差异和官方代码状态见 [related_work.md](related_work.md)。
@@ -30,14 +31,14 @@ Leiden region partition
 cheap region features + budgeted graph probes
             │
             ▼
-Budgeted paired gain measurement
+measured / conditional region selection (no deployment-token cutoff)
             │
             ▼
-budgeted regional materialization
+full-pipeline regional materialization
             │
-            ├── WARP-G 与四个 region-selector ablations
-            ├── KET-RAG / G2ConS matched-backend comparison
-            └── retrieval、reader、cost、significance artifacts
+            ├── WARP-G 与四个个数对齐的 region-selector ablations
+            ├── KET-RAG / G2ConS 原生 core 比例对照
+            └── retrieval、reader、实际 tokens、significance artifacts
 ```
 
 ## 项目结构
@@ -47,7 +48,7 @@ WARP-G/
 ├── configs/paper/          四个数据集的正式实验配置
 ├── scripts/                数据准备、整套实验执行和结果导出脚本
 ├── warp/
-│   ├── advisor/            特征、probe、收益预测和预算选择
+│   ├── advisor/            特征、probe、收益估计和区域选择
 │   ├── baselines/          KET-RAG 与 G2ConS
 │   ├── data/               数据 schema 适配与加载
 │   ├── eval/               检索、reader、统计和成本评测
@@ -90,11 +91,10 @@ WARP-G 的核心编排器。`WARPConfig` 定义检索深度、probe 比例、par
 1. 拟合 Base 检索器；
 2. 从 train workload 构建共访问图并进行 Leiden 分区；
 3. 提取区域特征并执行 graph probes；
-4. 对实测收益做零先验收缩；
-5. 测量 probe region 的二阶交互；
-6. 按预算选择和物化 regions；
-7. 执行 Base、WARP-G、Full Graph 和 graph-only 检索；
-8. 输出 routing、预测、probe、interaction 和成本审计信息。
+4. 对实测收益做零先验收缩；未探测区域不外推；
+5. 按方法自身规则选择并物化 regions（无部署 token 截断；条件模式下 control 对齐 WARP 实际选区个数）；
+6. 执行 Base、WARP-G、Full Graph 和 graph-only 检索，并另开 IRCoT 对照；
+7. 输出 routing、probe、选区与成本审计信息。
 
 test queries 只会进入评测和 routing diagnostics，不参与分区、特征、probe 或 收益估计。
 
@@ -104,12 +104,13 @@ test queries 只会进入评测和 routing diagnostics，不参与分区、特�
 
 - 读取并验证 YAML；
 - 固定 `seed=42` 创建 WARP-G、HippoRAG2、Base 和 CrossEncoder；
-- 在六个预算点运行 KET-RAG、G2ConS、四个 region-selection controls 和 WARP-G；
+- 每个方法只跑一轮完整 pipeline：KET-RAG、G2ConS、四个 region-selection controls 和 WARP-G；
 - 运行 BM25、Dense、Hybrid、HippoRAG2 和 Full Graph 参考实验；
-- 执行 partition ablation 和固定 reader evaluation；
-- 记录 deployment、design-search、first-run 和 online costs；
+- 执行 partition ablation 和固定 reader evaluation（复用该轮检索结果，不再按预算另选）；
+- 记录 deployment、design-search、first-run、online 的实际 tokens 与 token efficiency；
 - 完整执行五个 800/200 folds，并合并全部 1,000 条 held-out query；
-- 计算 query-level bootstrap CI、paired randomization、Holm correction 和 quality-cost AUC；
+- 计算 query-level bootstrap CI、paired randomization 和 Holm correction；
+  `actual_cost_fraction` 相对 Full Graph 仅作描述，不再扫多档预算画 AUC 主表；
 - 保存数据哈希、包版本、CUDA、GPU 和 HippoRAG commit 等复现元数据；
 - 最终写出一个自描述 JSON artifact。
 
@@ -178,7 +179,7 @@ semantic neighbors 形成低权重语义边。输出同时保存总边、两种�
 
 #### `warp/advisor/__init__.py`
 
-导出区域特征、probe、收益预测和预算选择的公开类。
+导出区域特征、probe、收益估计和区域选择的公开类。
 
 #### `warp/advisor/features.py`
 
@@ -198,26 +199,27 @@ CrossEncoder 路径测量每个 region 相对 Base 的真实增益。
 未探测区域不外推，报告标记为 `unprobed`；独立选区与 Gain-only 只选择单区已测正收益区域。
 默认 WARP 使用条件选区，允许单区零收益但联合有收益的区域组合。
 默认探测建图预算为全图估算成本的 10%，每区最多 64 个设计问题，不再要求至少六区。
-这是成本 proxy 约束，不是实际 API tokens 硬限额。具体方案见
-[无监督收益预测器的替代设计](measured_advisor_2026-09-09.md)。
+这是成本 proxy 约束，不是实际 API tokens 硬限额。
 
 #### `warp/advisor/selector.py`
 
-独立选区模式在相同 regions 和预算上实现以下 WARP-G 公式与四个选择器对照：
+独立选区模式在相同 regions 上只替换排序公式。WARP 按
 
 ```text
 query_frequency × max(estimated_gain, 0) / estimated_graph_cost
 ```
 
-它把 region 视为不可拆分对象，保证累计估算成本不超过给定预算；Random-region、Frequency-only、Gain-only 和
-Cost-only 提供频率、收益与成本规则的完整流程对照。
+选出 `score>0` 的区域后自然结束，不再用 token proxy 做背包截断。Random-region、Frequency-only、Gain-only 和
+Cost-only 取与 WARP 相同的区域个数，提供频率、收益与成本规则的完整流程对照。
 
 #### `warp/advisor/conditional.py` 与 `warp/retrieval/multistep.py`
 
 默认 paper 配置采用 ER/CE 混合收益、条件边际收益选区（带有限双区试探）和两步证据反馈检索。
 条件收益用同一批 train/design 问题测量，不重复乘区域频率。Base、区域图、全图及内置全局对照
 均使用相同的多步包装；原始查询始终用于累计候选的最终重排。这是 passage feedback，不是 IRCoT。
-逐步证据变化在检索后计算并保存，不进入检索决策。详见
+IRCoT 是另一条对照：主路径检索与 QA 仍用第一遍结果；`multistep_max_steps` 另开「检索 → LLM 扩展 query → 再检索」，
+逐步 JSONL 落盘，不覆盖 `retrieved_doc_ids`。正式检索指标统一报告 Evidence Recall / Complete Evidence
+**@2 / @3 / @5 / @10**。逐步证据变化在检索后计算并保存，不进入检索决策。详见
 [三项方法改进与消融说明](method_extensions_2026-09-10.md)。
 
 ### `warp/graph/`：HippoRAG2 后端
@@ -266,9 +268,10 @@ Cost-only 提供频率、收益与成本规则的完整流程对照。
 - G2ConS：sentence-level concept embeddings、semantic-filtered co-occurrence、Dice edge weights、concept
   PageRank、core chunk selection、concept graph expansion 和 HippoRAG2 core KG。
 
-`LightweightGraphIndex` 使用 FAISS 检索 query concepts 并沿轻量图扩展到文档；`GlobalBaselineFactory` 在统一
-预算下构造轻量结构与 core KG；`GlobalGraphBaseline` 将 Base、轻量结构和 graph results 按固定权重 RRF，
-最后进入共享 CrossEncoder。轻量 embedding、构图耗时、节点、边和存储全部计入 deployment cost。
+`LightweightGraphIndex` 使用 FAISS 检索 query concepts 并沿轻量图扩展到文档；`GlobalBaselineFactory` 按各自
+论文的文档比例（默认 0.8）选取 core 并构建 HippoRAG2 骨架图，不再套用 WARP 的 token 预算。
+`GlobalGraphBaseline` 将 Base、轻量结构和 graph results 按固定权重 RRF，最后进入共享 CrossEncoder。
+轻量 embedding、构图耗时、节点、边和存储全部计入 deployment cost。
 
 ### `warp/data/`：数据加载
 
@@ -297,10 +300,19 @@ IDs 和答案，强制每个 split 使用同一共享 corpus，并返回统一 `
 逐维累加多个 `ConstructionCost`。token、时间、图规模、存储和美元成本分别求和，不把异质单位压缩成一个
 不可解释的分数。
 
+#### `warp/eval/cutoffs.py`
+
+固定正式截断 `RETRIEVAL_KS = (2, 3, 5, 10)` 和 Reader `top_k=5`，避免主表与 IRCoT 对照各写一套 k。
+
 #### `warp/eval/retrieval.py`
 
-计算每题和整体的 `Evidence Recall@5/10`、`Complete Evidence@5/10`，保存 per-query metrics，并对每个指标
-执行 paired bootstrap 95% confidence interval。
+计算每题和整体的 `Evidence Recall@2/3/5/10`、`Complete Evidence@2/3/5/10`，保存 per-query metrics、
+`retrieved_doc_ids` 和 `ranked_results`，并对每个指标执行 paired bootstrap 95% confidence interval。
+
+#### `warp/eval/multistep.py`
+
+IRCoT 对照：每步检索、LLM 生成下一步 query 或 END，累计去重排序，并把每条 query 的逐步轨迹写成 JSONL。
+检索决策不读 gold；gold 只用于事后逐步 Recall/CE。这与 `warp/retrieval/multistep.py` 的 passage-feedback 不是同一协议。
 
 #### `warp/eval/statistics.py`
 
@@ -330,8 +342,9 @@ query set 并由 runner 做五折交叉拟合。
 
 #### `scripts/export_paper_results.py`
 
-读取四个正式 JSON artifacts，将嵌套结果展开成论文绘图和制表使用的 tidy CSV：baseline、quality-cost
-trials/summary/AUC、partition ablation、reader 和 Holm-corrected paired significance。
+读取四个正式 JSON artifacts，将嵌套结果展开成论文绘图和制表使用的 tidy CSV：baseline、quality trials/summary、
+实际 tokens / token efficiency、partition ablation、reader 和 Holm-corrected paired significance。
+JSON 仍可能带有 `quality_cost_auc` 字段，但单点 pipeline 下 AUC 为占位，不是主结论。
 
 #### `scripts/prepare_official_baselines.py`
 
@@ -340,7 +353,7 @@ trials/summary/AUC、partition ablation、reader 和 Holm-corrected paired signi
 #### `scripts/run_official_baseline.py` 与 `scripts/run_official_suite.py`
 
 把当前完整 corpus 和 1,000 条 queries 送入锁定的作者官方 API，分别或成套运行独立 end-to-end 对照，记录输入哈希、
-官方 commit、构建/查询 wall time、逐题答案和 EM/F1。它们不混入同后端 region-budget 曲线。
+官方 commit、构建/查询 wall time、逐题答案和 EM/F1。它们不混入同后端区域选择与实际 token 主表。
 
 #### `scripts/export_official_results.py`
 
@@ -355,12 +368,13 @@ trials/summary/AUC、partition ablation、reader 和 Holm-corrected paired signi
 - `musique.yaml`
 - `popqa.yaml`
 
-每份配置显式指定 corpus/query set、五折交叉拟合、WARP 参数、HippoRAG2 参数、固定模型 revision、六个预算点、
-`seed=42`、partition ablation 和 reader methods。代码不会在正式运行时自动搜索或改变这些参数。
+每份配置显式指定 corpus/query set、五折交叉拟合、WARP 参数、HippoRAG2 参数、固定模型 revision、
+KET/G2 core 比例、`seed=42`、partition ablation 和 reader methods。没有部署预算列表；代码不会在正式运行时
+自动搜索或改变这些参数。
 
 ## 安装
 
-需要 Python 3.10+、CUDA、OpenAI API 凭证和 Hugging Face 模型访问权限：
+需要 Python 3.10+、CUDA、兼容 OpenAI SDK 的 LLM API 凭证和 Hugging Face 模型访问权限：
 
 ```bash
 pip install -e .
@@ -372,7 +386,7 @@ export CUDA_VISIBLE_DEVICES=0
 正式后端为：
 
 - graph/dense：`nvidia/NV-Embed-v2`；
-- OpenIE/reader：`gpt-4o-mini-2024-07-18`；
+- OpenIE/reader：`deepseek-v4-flash`（`https://yibuapi.com/v1`，关闭 thinking）；
 - reranker：固定 revision 的 `BAAI/bge-reranker-v2-m3`；
 - graph implementation：锁定 commit `c617143f01477243992a63b2e2151cc003dd3b21` 的 HippoRAG2。
 

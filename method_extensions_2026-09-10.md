@@ -1,7 +1,6 @@
 # 三项方法改进：实现、实验口径与限制
 
-本次改动接续 measured_advisor_2026-09-09.md，替换其中“条件增益、多步检索尚未实现”的描述。
-LightGBM 仍已删除。以下描述代码实际行为，尚无真实数据实验支持效果提升。
+以下描述当前代码实际行为。没有收益回归器；未探测区域不外推。尚无真实数据实验支持效果提升。
 
 ## 1. 稀疏收益：部分补证与整题完成共同提供信号
 
@@ -18,8 +17,8 @@ LightGBM 仍已删除。以下描述代码实际行为，尚无真实数据实�
 ## 2. 条件边际收益与双区试探
 
 selection_mode=conditional 为新默认 WARP 选区方式；independent 保留上一版收益/成本排序用于消融。
-候选限定为已探测建图、在当前预算内可负担的区域。按旧估计收益/成本优先截取至多 6 区，
-并保留其中零/负单区收益候选参与联合测量，而不是预先删除。
+候选限定为已探测建图的区域。按旧估计收益/成本优先截取至多 6 区，
+并保留其中零/负单区收益候选参与联合测量，而不是预先删除。部署阶段不再按 token proxy 过滤“买得起”的区域。
 
 从整个 train/design workload 均匀抽取至多 32 题，对所有候选集合用相同问题测量：
 
@@ -30,12 +29,11 @@ S 为当前已选区域，A 为一个区域或有限数量的双区域组合。�
 以 CE 为目标时，两个区域单独都零增益但一起补齐证据，能够通过双区提案入选。
 每轮都重新评估相对于当前 S 的收益，允许已选区域改变下一轮的最优选择。
 
-边界：每预算最多 3 轮，每轮最多 6 个双区提案，每预算最多实际测量 16 个不同集合（包含 Base）。
-每集合最多 32 题，最多检索 retrieval_steps 步；不新增探测图。同一次预算选择内缓存集合结果，
-同一模型同一预算再次 select 不重复检索。不同预算独立测量和计费，不假设跨预算复用。
-零预算或无可负担候选直接返回 Base，不产生条件测量调用。
+边界：整次条件选区最多 3 轮，每轮最多 6 个双区提案，最多实际测量 16 个不同集合（包含 Base）。
+每集合最多 32 题，最多检索 retrieval_steps 步；不新增探测图。同一次 `full_pipeline` 选择内缓存集合结果，
+同一模型再次 `select("warp")` 不重复检索。边际 gain≤0 时停止。无可探测候选则返回 Base，不产生条件测量调用。
 
-这些上限防止无界枚举，但意味着不保证找到全局最优组合：候选截断、双区截断、低探测预算、三阶互补
+这些上限防止无界枚举，但意味着不保证找到全局最优组合：候选截断、双区截断、低探测构图 proxy、三阶互补
 都可能导致漏选。不能把上限触发后的“没有选更多区域”解释为其余区域确实没有收益。
 报告保存 sample_query_ids、candidate_regions、全部评估提案逐题净变化、每轮选择、评估集合数及上限触发标记；
 原始 JSONL 另存每个实际测量集合的检索文档、ER、CE 和效用。
@@ -65,20 +63,32 @@ HippoRAG graph-only 及本仓库 KET-RAG/G2ConS 统一应用相同步数和反�
 
 ## 成本归属与 Reader
 
-WARP 的 design_search_cost 包含探测构图、探测检索和当前预算的条件选区检索。
+WARP 的 design_search_cost 包含探测构图、探测检索和这一轮条件选区检索。
 Gain-only 只承担它所使用的探测成本；Random/Frequency/Cost 不承担条件选区成本。
 计算 test online_retrieval_cost 的起点移到 select 之后，避免把条件设计算进测试在线开销或重复收费。
 条件测量 wall time 扣除已计入检索的部分后纳入方法设计时间。partition ablations 同样保存新增设计成本。
 
-10% 探测预算仍是构图成本 proxy 上限，不包含新增条件测量，也不是实际 API tokens 硬限额。
-最大集合数限制的是检索工作量，不能换算为严格 tokens 上限。不同方法步数相同也不代表实际图调用数或 tokens 相同，
+10% 探测构图 proxy 仍是试建区域的成本上限，不包含新增条件测量，也不是实际 API tokens 硬限额，
+更不是部署截断。最大集合数限制的是检索工作量，不能换算为严格 tokens 上限。不同方法步数相同也不代表实际图调用数或 tokens 相同，
 仍需同时比较实际成本。Raw JSONL 保存实际多步过程及调用记录。
-Reader 继续使用测试检索已保存的最终文档列表，不为回答重新检索。
+Reader 继续使用测试检索已保存的最终文档列表，不为回答重新检索，也不另设 reader 预算档。
+
+## 4. IRCoT 多步对照
+
+paper 配置 `multistep_max_steps: 3`。这与第 3 节 passage-feedback **不是同一条协议**：
+
+- 主路径检索（含可选的 `retrieval_steps` passage-feedback）先算完，保存 `retrieved_doc_ids` / `ranked_results`，Reader 只用这一批文档。
+- 然后对同一套底层单步检索函数另开 IRCoT：检索 → LLM 根据当前文档生成下一步 query 或 `END` → 再检索，累计去重排序。
+- 逐步 JSONL 写到 `<checkpoint-dir>/multistep/fold-<k>/<method>.jsonl`，每步包含 query/改写、命中 region、top-k 文档与分数、推理文本、本步及累计 gold hit、Recall/CE@2/3/5/10、token/调用和时间戳。
+- 不根据 gold 提前停止；gold 只用于事后逐步指标。`--skip-multistep` 把步数设为 0，跳过对照。
+
+没有共享 LLM 时生成器返回 `END`，因此不会空转。IRCoT 的检索调用不计入主路径 `online_retrieval_cost`。
 
 ## 可复现消融
 
 已生成 configs/ablations/hotpotqa 下 12 份配置：3 种目标 × 2 种选区方式 × 1/2 步检索。
-各配置共享数据、fold、seed、探测预算、部署预算及 Reader 口径，关闭额外 partition ablations 以免扩增无关成本。
+各配置共享数据、fold、seed、探测构图 proxy 及 Reader 口径，关闭额外 partition ablations 以免扩增无关成本。
+没有部署预算列表；每个方法只跑一轮完整 pipeline。
 生成其他数据集配置：
 
 ```sh
@@ -99,7 +109,5 @@ python -m warp.run --config configs/ablations/hotpotqa/mixed-conditional-2step.y
 
 ## 验证
 
-41 项 CPU 单元及模拟集成测试通过。新增覆盖混合目标、负收益、联合零单区增益、设计样本隔离、候选预算、
-集合评估上限、选择缓存、成本归属、第二跳发现、原问题重排、动态路由、未部署图隔离、提前停止及真实 fit/probe 路径。
-完整 runner 模拟测试已启用条件选区和两步检索，覆盖多个方法/预算、Reader、导出、原始日志、快照及 checkpoint 恢复。
+CPU 单元及模拟集成测试覆盖混合目标、负收益、联合零单区增益、control 对齐实际 WARP 个数、IRCoT 逐步日志、Reader 复用检索、导出与 checkpoint 恢复。
 实际 GPU/FAISS/HippoRAG 和付费 LLM 端到端实验尚未运行，不保证真实收益。

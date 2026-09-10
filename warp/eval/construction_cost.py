@@ -1,8 +1,50 @@
-"""区域图成本的逐维聚合，避免把异质单位隐藏在单个分数中。"""
+"""区域图成本的逐维聚合，以及按实际 tokens 计算的效率指标。"""
 
 from __future__ import annotations
 
+from typing import Any
+
 from warp.models import ConstructionCost
+
+
+def consumed_tokens(payload: dict[str, Any] | None) -> int:
+    """把 deployment / first-run / online 字典折成总消耗 tokens。"""
+    if not payload:
+        return 0
+    if "input_tokens" in payload or "embedding_tokens" in payload:
+        return (
+            int(payload.get("input_tokens") or 0)
+            + int(payload.get("output_tokens") or 0)
+            + int(payload.get("embedding_tokens") or 0)
+        )
+    return int(payload.get("logical_input_tokens") or 0) + int(payload.get("logical_output_tokens") or 0)
+
+
+def token_efficiency(quality: float, tokens: int) -> float | None:
+    """检索效果 / 总消耗 tokens；分母为 0 时无法定义。"""
+    if tokens <= 0:
+        return None
+    return float(quality) / float(tokens)
+
+
+def attach_token_efficiency(row: dict[str, Any], extra_online: int = 0) -> None:
+    """写入含/不含设计成本的实际 Token Efficiency。"""
+    deployed = consumed_tokens(row.get("deployment_cost") or row.get("actual_construction_cost"))
+    first_payload = row.get("first_run_cost_including_probe")
+    first_run = consumed_tokens(first_payload) if first_payload else deployed
+    online = consumed_tokens(row.get("online_retrieval_cost")) + extra_online
+    excluding = deployed + online
+    including = first_run + online
+    row["total_tokens_excluding_design"] = excluding
+    row["total_tokens_including_design"] = including
+    evidence = row.get("complete_evidence@10")
+    if evidence is not None:
+        row["token_efficiency_excluding_design"] = token_efficiency(float(evidence), excluding)
+        row["token_efficiency_including_design"] = token_efficiency(float(evidence), including)
+    answer_em = row.get("answer_em")
+    if answer_em is not None:
+        row["token_efficiency_em_excluding_design"] = token_efficiency(float(answer_em), excluding)
+        row["token_efficiency_em_including_design"] = token_efficiency(float(answer_em), including)
 
 
 def aggregate_costs(costs: list[ConstructionCost]) -> ConstructionCost:

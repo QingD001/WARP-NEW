@@ -6,8 +6,8 @@
 ## 1. 一句话定位
 
 WARP-G 将昂贵 GraphRAG 索引的部署范围视为一个 **workload-aware regional physical-design problem**：它根据历史
-design workload 将共享语料划分为共同访问区域，用少量真实 GraphRAG probes 学习区域构图收益，并在全局构建预算下
-只物化预期价值最高的区域图。
+design workload 将共享语料划分为共同访问区域，用少量真实 GraphRAG probes 测量区域构图收益，再按边际收益选出
+要物化的区域图。部署阶段不施加 token 预算截断；实验主报实际构图 tokens，对照对齐 WARP 的选区个数。
 
 WARP-G 不发明新的 KG extraction 或 graph retrieval backend。当前图能力来自锁定版本的官方 HippoRAG2；WARP-G
 负责决定昂贵图能力应该部署在哪里，以及如何在新查询到来时访问已经部署的区域图。
@@ -39,13 +39,12 @@ KET-RAG、G2ConS 等方法已经说明，可以根据 chunk/concept centrality �
 ### 2.3 区域价值不能在不构图时直接观察
 
 某个区域是否值得构图，严格来说只有在该区域真实构建 GraphRAG、运行相关查询并和 Base 比较后才能知道。对所有区域都
-这样测量，会先花掉接近 Full Graph 的成本，使选择策略失去意义。因此需要少量 probe regions、廉价构图前特征和一个
-能够外推到未 probe regions 的 benefit predictor。
+这样测量，会先花掉接近 Full Graph 的成本，使选择策略失去意义。因此只对少量 probe regions 实测收益；未探测区域不外推。
 
 ### 2.4 成本节省必须在 held-out workload 上成立
 
 如果使用同一批 query 同时设计区域和报告效果，策略可能只是在记忆 benchmark。WARP-G 使用五折 cross-fitting，每折
-只允许 800 条 design queries 影响 partition、probe、predictor 和 selection，另 200 条 queries 只用于测试；最终每条
+只允许 800 条 design queries 影响 partition、probe 和 selection，另 200 条 queries 只用于测试；最终每条
 query 恰好作为一次 held-out test。这样测量的是历史 workload 对未来同分布需求的迁移能力，而不是训练集拟合程度。
 
 ## 3. Problem：问题是什么
@@ -59,7 +58,6 @@ query 恰好作为一次 held-out test。这样测量的是历史 workload 对�
 - 不使用 gold evidence 的 held-out workload `Q_test`；
 - 覆盖整个语料的共享 Base Retriever `H`；
 - 固定 GraphRAG backend `G`，当前为 HippoRAG2；
-- 全局离线图构建预算 `B`；
 - 检索效用指标 `M`，主指标为 `CompleteEvidence@10`。
 
 design workload 与语义近邻共同诱导文档分区：
@@ -70,22 +68,17 @@ r_i ∩ r_j = ∅,
 union(R) = D.
 ```
 
-为区域 `r_i` 构建图索引的估算成本记为 `c_i`。系统需要选择区域集合 `S ⊆ R`：
-
-```text
-Σ(r_i ∈ S) c_i ≤ B.
-```
-
+为区域 `r_i` 构建图索引的估算成本记为 `c_i`。系统按边际收益规则选择 `S ⊆ R`，**不施加部署 token 预算**。
 部署后，test query 先经过 Base Retriever；只有被 Base 命中的、且属于 `S` 的区域才调用 regional graph。最终目标是最大化
 held-out workload 的期望检索效用：
 
 ```text
 S* = argmax_{S ⊆ R} E_{q ~ Q_future}[M(q; H, G_S)]
-     subject to Σ(r_i ∈ S) c_i ≤ B.
+     subject to keeping only regions with positive marginal gain.
 ```
 
-这里的 `Q_future` 用每折的 `Q_test` 近似。测试 query 不允许参与 partition、feature statistics、probe labels、模型拟合、
-预算选择或参数调整。
+这里的 `Q_future` 用每折的 `Q_test` 近似。测试 query 不允许参与 partition、feature statistics、probe labels、
+区域选择或参数调整。实验不扫描部署 token 预算；主报实际构图 tokens。
 
 ### 3.2 当前方法使用的可部署近似
 
@@ -93,11 +86,10 @@ S* = argmax_{S ⊆ R} E_{q ~ Q_future}[M(q; H, G_S)]
 独立边际收益 `g_i`，再计算：
 
 ```text
-score_i = query_frequency_i × max(predicted_gain_i, 0) / estimated_graph_cost_i.
+score_i = query_frequency_i × max(measured_gain_i, 0) / estimated_graph_cost_i.
 ```
 
-区域按 score 贪心选择，累计成本不得超过 `B`。这是一种可部署 heuristic，不是一般非加性集合效用问题的最优算法。
-代码通过 probe-region pair interaction 测量独立收益假设偏离程度；若交互显著，论文必须把该算法描述为近似策略。
+独立模式选出全部 `score_i>0` 的区域后停止；条件模式在探测区内测量边际增益，增益非正时停止。这是可部署 heuristic，不是一般非加性集合效用问题的最优算法。paper 默认不跑二阶交互主表（`interaction_pairs=0`）。
 
 ### 3.3 研究范围
 
@@ -106,7 +98,7 @@ score_i = query_frequency_i × max(predicted_gain_i, 0) / estimated_graph_cost_i
 - supervised workload-aware physical design；
 - 静态共享 corpus 和重复/同分布 workload；
 - 固定的一种 GraphRAG representation 在哪些区域物化；
-- 离线 construction budget 与线上 retrieval cost 分别记账；
+- 离线实际构图 tokens 与线上 retrieval cost 分别记账；
 - 以 evidence retrieval 和固定 reader 的 answer EM/F1 为结果。
 
 当前不解决：完全无标注日志、快速 workload drift、动态文档更新、跨 backend 自动选择、在线 agent planning、每题临时
@@ -131,14 +123,14 @@ WARP-G 位于这些方向的交叉点。论文的研究缺口不应写成“过�
 
 | 创新点 | 当前实现 | 新颖性来自哪里 | 已知组成，不能单独声称首创 |
 |---|---|---|---|
-| GraphRAG physical-design formulation | 将 regional KG 视为预算约束下的可选物理结构 | 把 workload demand、QA graph utility 和 construction budget 放进同一 GraphRAG 部署问题 | workload-aware index/view selection 的总体思想 |
+| GraphRAG physical-design formulation | 将 regional KG 视为可选物理结构 | 把 workload demand、QA graph utility 和实际构图 tokens 放进同一 GraphRAG 部署问题 | workload-aware index/view selection 的总体思想 |
 | Workload-aware regionalization | 用 Base top-k query coaccess 与 semantic kNN 建图，再用 Leiden 形成物化单元 | region 反映“未来问题可能共同需要哪些文档”，不是只反映 corpus 语义社区 | coaccess graph、semantic kNN、Leiden |
-| Probe-and-predict graph utility | 分层选择少量区域，真实构建 HippoRAG2，测量相对 Base 的 CompleteEvidence gain，再用廉价特征预测其他区域 | GraphRAG benefit 是昂贵且不可直接观测的，通过少量真实部署样本估计 | supervised regression、LightGBM、feature importance |
-| Demand–gain–cost joint selection | 用 frequency、正边际收益和 graph cost 共同排序 | 明确区分“经常被访问”“需要图”“构图便宜”三个条件 | greedy benefit/cost ranking、knapsack heuristic |
+| Probe-and-select graph utility | 选择少量区域真实构建 HippoRAG2，测量相对 Base 的混合效用增益；未探测区域不外推 | GraphRAG benefit 是昂贵且不可直接观测的，通过少量真实部署样本估计 | probe sampling |
+| Demand–gain–cost joint selection | 用 frequency、正边际收益和 graph cost 共同排序，或在探测区内做条件边际测量 | 明确区分“经常被访问”“需要图”“构图便宜”三个条件 | greedy benefit/cost ranking |
 | Regional materialization and routing | 每个选中 region 建隔离的官方 HippoRAG2 index；查询只访问 Base 命中的已部署区域 | 把离线布局决策落实为真实可查询的 GraphRAG artifact，并保持全语料 Base 覆盖 | Base routing、RRF、CrossEncoder |
 | Cross-fitted quality–cost evaluation | 每折完整重做 physical design，合并 1,000 条 held-out 结果，并分账 deployment/design/online cost | 防止测试 query 参与布局，同时测量 first-run 和 amortized deployment trade-off | cross-validation、paired bootstrap/randomization |
 
-最核心的创新是前四项构成的闭环。单独换用 LightGBM、Leiden 或 HippoRAG2 不构成论文贡献；如果实验不能证明联合策略优于
+最核心的创新是前四项构成的闭环。单独换用 Leiden 或 HippoRAG2 不构成论文贡献；如果实验不能证明联合策略优于
 Frequency-only、Gain-only、Cost-only、KET-RAG 和 G2ConS，则“workload-aware learned physical design”的核心论点不成立。
 
 ## 6. Contributions：论文可以主张的贡献
@@ -146,13 +138,13 @@ Frequency-only、Gain-only、Cost-only、KET-RAG 和 G2ConS，则“workload-awa
 ### 6.1 中文版本
 
 1. **问题定义。** 提出昂贵 GraphRAG 索引的 workload-aware regional physical-design 问题：在共享 Base Retriever
-   和全局构建预算下，选择应当物化 GraphRAG 的语料区域，使未来 workload 的证据检索质量最大化。
-2. **方法。** 提出 WARP-G，通过 query coaccess 形成区域，利用少量真实 GraphRAG probes 学习区域边际收益，并联合
-   workload frequency、predicted gain 与 construction cost 选择和部署 regional graph indices。
+   下选择应当物化 GraphRAG 的语料区域，使未来 workload 的证据检索质量最大化，并用实际构图 tokens 评价成本。
+2. **方法。** 提出 WARP-G，通过 query coaccess 形成区域，利用少量真实 GraphRAG probes 测量区域边际收益，未探测区域不外推，并联合
+   workload frequency、measured gain 与 construction cost 选择和部署 regional graph indices。
 3. **系统。** 在不重写图算法的前提下，把每个区域映射为隔离的官方 HippoRAG2 索引，并使用共享 Base routing、RRF 和
    CrossEncoder 将区域物化策略转化为可运行的 end-to-end GraphRAG 系统。
-4. **评测。** 建立五折 cross-fitted、matched-budget 的评测协议，在四个数据集上与 KET-RAG、G2ConS、区域选择消融、
-   零图 Base 和 Full Graph 比较，同时报告 deployment、design-search、first-run 和 online cost。
+4. **评测。** 建立五折 cross-fitted 评测协议：各方法跑完完整 pipeline，对照对齐 WARP 选区个数或各自原生 core 比例，
+   在四个数据集上与 KET-RAG、G2ConS、区域选择消融、零图 Base 和 Full Graph 比较，同时报告 deployment、design-search、first-run 和 online 的实际 tokens。
 5. **经验发现。** 如果正式结果支持，则可报告 GraphRAG 的边际收益在语料区域间显著异质，以及 workload-aware selective
    materialization 能在较低实际构建成本下接近或超过 full/corpus-only alternatives。该条必须在结果出来后填写具体数值，
    不能在实验前作为既成事实。
@@ -160,21 +152,22 @@ Frequency-only、Gain-only、Cost-only、KET-RAG 和 G2ConS，则“workload-awa
 ### 6.2 可用于论文的英文版本
 
 > 1. We formulate expensive GraphRAG indexing as a workload-aware regional physical-design problem: given a shared
->    base retriever and a global construction budget, the system selects corpus regions on which graph indices should
->    be materialized to maximize retrieval utility on future queries.
+>    base retriever, the system selects corpus regions on which graph indices should
+>    be materialized to maximize retrieval utility on future queries, and reports realized construction tokens.
 > 2. We propose WARP-G, which derives regions from query co-access patterns, estimates regional marginal graph utility
->    from a small number of real GraphRAG probes, and jointly accounts for workload frequency, predicted gain, and
->    construction cost when selecting regional materializations.
+>    from a small number of real GraphRAG probes without extrapolating to unprobed regions, and jointly accounts for
+>    workload frequency, measured gain, and construction cost when selecting regional materializations.
 > 3. We implement WARP-G as a backend-preserving physical-design layer over the official HippoRAG2 implementation,
 >    with deterministic base routing and isolated regional graph artifacts, enabling controlled comparison against
 >    full-graph and corpus-centric selective-indexing approaches.
-> 4. We introduce a cross-fitted, matched-budget evaluation protocol that separates design and test queries and reports
->    deployment, design-search, first-run, and online retrieval costs together with evidence and answer quality.
+> 4. We introduce a cross-fitted evaluation protocol that separates design and test queries, aligns selector controls
+>    by region count rather than token budget, and reports deployment, design-search, first-run, and online tokens
+>    together with evidence and answer quality.
 
 结果贡献应在正式实验完成后单独补充，例如：
 
-> Across [datasets], WARP-G achieves [quality/cost result] and consistently outperforms [baselines] at matched realized
-> construction budgets.
+> Across [datasets], WARP-G achieves [quality/cost result] and consistently outperforms [baselines] at realized
+> construction tokens, with selector controls matched on the number of selected regions.
 
 方括号内容不得在没有正式结果时预填。
 
@@ -186,16 +179,16 @@ Frequency-only、Gain-only、Cost-only、KET-RAG 和 G2ConS，则“workload-awa
 historical QA workload
   -> workload coaccess regions
   -> selective real GraphRAG probes
-  -> regional marginal-utility prediction
-  -> budgeted regional graph materialization
+  -> regional marginal-utility measurement (no unprobed extrapolation)
+  -> regional graph materialization (no deployment-token cutoff)
   -> Base-routed evaluation on held-out queries
 ```
 
 因此可以使用带限定语的主张：
 
 > To our knowledge, WARP-G is the first framework to study workload-aware regional physical design for expensive
-> GraphRAG indexing, combining selective graph-utility probing, regional benefit prediction, and budget-constrained
-> graph materialization for future workloads.
+> GraphRAG indexing, combining selective graph-utility probing and regional materialization without a deployment-token
+> cutoff for future workloads.
 
 不能使用以下更宽泛的声明：
 
@@ -216,22 +209,22 @@ Introduction 可以按以下逻辑展开：
 2. 真实 workload 在语料空间中不均匀，而且图相对强 Base 的收益也可能不均匀或为负；
 3. 现有低成本 GraphRAG 主要按 corpus centrality 选择内容，online adaptive RAG 则无法收回已经支付的全图构建成本；
 4. 因此关键问题不是再设计一个图检索器，而是决定**图应该在哪里被物化**；
-5. WARP-G 用 workload coaccess regions、少量真实 probes、benefit prediction 和 budget selection 回答这个问题；
-6. cross-fitted matched-budget 实验检验区域收益异质性、可预测性和实际 quality–cost 优势。
+5. WARP-G 用 workload coaccess regions、少量真实 probes 和边际收益选区回答这个问题；
+6. cross-fitted 完整 pipeline 实验检验区域收益异质性、选择规则和实际 token–quality 权衡。
 
 ## 9. 使 contributions 成立所需的证据
 
 | 主张 | 必须报告的证据 |
 |---|---|
 | 区域 graph gain 不均匀 | probe gain 分布、正/负收益比例、跨 fold/dataset 稳定性 |
-| gain 可以预测 | leave-one-region-out MAE/RMSE/Spearman、learning curve、feature ablation |
-| 三信号联合有效 | Random、Frequency-only、Gain-only、Cost-only 与 WARP 的同预算比较 |
+| 选择只用实测收益 | 未探测区域不外推；条件选区相对独立 score 与个数对齐对照 |
+| 三信号联合有效 | Random、Frequency-only、Gain-only、Cost-only 与 WARP 在相同选区个数下的比较 |
 | 比 corpus-only selective GraphRAG 更好 | matched-backend KET-RAG/G2ConS 的实际 cost–quality frontier |
 | 节省不是记账假象 | actual deployment cost、design-search cost、first-run cost、online cost 和 quality-cost AUC |
 | 没有 test leakage | 每折重新 partition/probe/train/select，test queries 只进入最终 evaluation |
-| 区域化没有破坏关键关系 | Full Graph 对照、pair interaction、any/complete gold-region routing recall、partition ablation |
+| 区域化没有破坏关键关系 | Full Graph 对照、any/complete gold-region routing recall、partition ablation |
 | 结果可推广 | HotpotQA、2WikiMultiHopQA、MuSiQue 和 single-hop PopQA control 的一致趋势 |
 
 如果 WARP-G 不能稳定优于 Frequency-only 或 G2ConS，贡献应降级为“GraphRAG regional utility 的实证分析与负面结果”，
-不能继续声称 learned workload-aware selection 有效。反之，如果这些证据成立，当前 formulation、system 和 evaluation 三层
+不能继续声称 workload-aware selection 有效。反之，如果这些证据成立，当前 formulation、system 和 evaluation 三层
 贡献足以形成一篇边界清楚的 GraphRAG efficiency/physical-design 工作。

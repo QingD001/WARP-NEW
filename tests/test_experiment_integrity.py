@@ -115,7 +115,7 @@ class IntegrityTests(unittest.TestCase):
         # and physical-design training are replaced.
         config = run.load_config("configs/paper/hotpotqa.yaml")
         config["experiment"]["cross_fitting_folds"] = 2
-        config["experiment"]["budgets"] = [0, 1]
+        config["experiment"].pop("budgets", None)
         config["experiment"]["randomization_samples"] = 20
         config["reader"]["methods"] = list(config["experiment"]["methods"]) + ["bm25", "dense", "hybrid", "hipporag2", "full_graph"]
 
@@ -124,6 +124,9 @@ class IntegrityTests(unittest.TestCase):
             model.config.candidate_k = 50
             model.config.retrieval_k = 10
             model.config.retrieval_steps = config["warp"]["retrieval_steps"]
+            model.config.multistep_max_steps = int(config["warp"].get("multistep_max_steps", 0))
+            if "retrieval_ks" in config["warp"]:
+                model.config.retrieval_ks = tuple(config["warp"]["retrieval_ks"])
             model.config.selection_mode = config["warp"]["selection_mode"]
             model.bundle = bundle
             model.base.bm25 = model.base
@@ -141,11 +144,13 @@ class IntegrityTests(unittest.TestCase):
             return model, model.graph_retriever
 
         class Factory:
-            def __init__(self, documents, base, builder, retriever, reranker, candidate_k):
+            def __init__(self, documents, base, builder, retriever, reranker, candidate_k, **kwargs):
                 self.base = base
                 self.doc_costs = {}
+                self.ket_core_fraction = kwargs.get("ket_core_fraction", 0.8)
+                self.g2_core_fraction = kwargs.get("g2_core_fraction", 0.8)
 
-            def build(self, method, budget):
+            def build(self, method, *args, **kwargs):
                 return types.SimpleNamespace(search=self.base.search, graph=None, lightweight=None,
                                              cost=ConstructionCost())
 
@@ -169,7 +174,12 @@ class IntegrityTests(unittest.TestCase):
                  patch.object(run, "GlobalBaselineFactory", Factory), \
                  patch.object(run, "evaluate_hipporag2_reader", side_effect=reader):
                 output = run.run_experiment(config, root / "checkpoints")
-                self.assertEqual(len(output["quality_cost_curve"]), 28)
+                self.assertEqual(len(output["quality_cost_curve"]), 14)
+                self.assertTrue(all("evidence_recall@2" in row and "complete_evidence@3" in row
+                                    for row in output["quality_cost_curve"]))
+                self.assertTrue(all(row.get("multistep", {}).get("protocol") == "ircot"
+                                    for row in output["quality_cost_curve"]))
+                self.assertTrue((root / "checkpoints" / "multistep" / "fold-0" / "warp.jsonl").exists())
                 self.assertEqual(len(output["partition_ablations"]), 6)
                 self.assertTrue(all(row["num_queries"] == 4 for row in output["baselines"]))
                 self.assertIn("hybrid", {row["reference"] for row in output["paired_significance"]})

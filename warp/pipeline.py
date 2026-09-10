@@ -14,7 +14,7 @@ import time
 import random
 import statistics
 from typing import Any
-from warp.audit import audit_scope, emit
+from warp.audit import audit_scope, emit, audit_context
 
 from warp.advisor.conditional import select_conditional
 from warp.advisor.objective import utility
@@ -22,9 +22,10 @@ from warp.retrieval.multistep import retrieve_steps
 from warp.advisor.features import RegionFeatureExtractor
 from warp.advisor.estimator import estimate_benefits
 from warp.advisor.probe import ProbeOutcome, RegionProber, complete_evidence, evidence_recall
-from warp.advisor.selector import BudgetSelector
+from warp.advisor.selector import RegionSelector
 from warp.eval.diagnostics import annotate_steps
 from warp.eval.construction_cost import aggregate_costs
+from warp.eval.cutoffs import RETRIEVAL_KS
 from warp.eval.retrieval import evaluate_retrieval
 from warp.graph.builder import GraphBuilder, RegionalGraph
 from warp.graph.retriever import GraphRetriever
@@ -65,6 +66,8 @@ class WARPConfig:
     min_region_size: int = 1
     partition_mode: str = "combined"
     seed: int = 42
+    retrieval_ks: tuple[int, ...] = RETRIEVAL_KS
+    multistep_max_steps: int = 0
 
     def __post_init__(self) -> None:
         if self.benefit_objective not in {"mixed", "evidence_recall", "complete_evidence"} or not 0 <= self.complete_weight <= 1:
@@ -84,6 +87,12 @@ class WARPConfig:
             raise ValueError("partition_mode must be combined, query, semantic, or random")
         if self.probe_budget_fraction is not None and not 0 < self.probe_budget_fraction <= 1:
             raise ValueError("probe_budget_fraction must be in (0, 1]")
+        self.retrieval_ks = tuple(int(k) for k in self.retrieval_ks)
+        if not self.retrieval_ks or any(k <= 0 for k in self.retrieval_ks):
+            raise ValueError("retrieval_ks must be a non-empty sequence of positive cutoffs")
+        if int(self.multistep_max_steps) < 0:
+            raise ValueError("multistep_max_steps must be nonnegative")
+        self.multistep_max_steps = int(self.multistep_max_steps)
 
 
 class WARPG:
@@ -97,7 +106,7 @@ class WARPG:
         self.graph_builder = graph_builder
         self.graph_retriever = graph_retriever
         self.reranker = reranker
-        self.selector = BudgetSelector(config.seed)
+        self.selector = RegionSelector(config.seed)
         self.bundle: DatasetBundle | None = None
         self.coaccess: CoaccessGraph | None = None
         self.regions: list[Region] = []
@@ -299,27 +308,28 @@ class WARPG:
 
     @property
     def full_graph_cost(self) -> float:
-        """返回所有区域 token proxy 之和，作为选择时预算分母。"""
+        """返回所有区域 token proxy 之和，仅作成本对照分母，不再用于截断。"""
         return sum(self.costs.values())
 
-    def select(self, budget_fraction: float, method: str = "warp") -> list[str]:
-        """把相对预算转换为绝对 proxy cost，并调用统一 BudgetSelector。"""
-        if not 0.0 <= budget_fraction <= 1.0:
-            raise ValueError("budget_fraction must be between 0 and 1")
-        if method.lower() == "warp" and self.config.selection_mode == "conditional":
-            key = str(float(budget_fraction))
+    def select(self, method: str = "warp") -> list[str]:
+        """WARP 按自身规则选完全部合格区域；controls 只换公式并对齐区域个数。"""
+        method = method.lower()
+        if method == "warp" and self.config.selection_mode == "conditional":
+            key = "full_pipeline"
             if key not in self.selection_cache:
                 before = self.graph_retriever.stats()
                 started = time.perf_counter()
-                with audit_scope(stage="conditional_design", budget_fraction=budget_fraction):
-                    selected, report = select_conditional(self, budget_fraction * self.full_graph_cost)
+                with audit_scope(stage="conditional_design", selection=key):
+                    selected, report = select_conditional(self)
                 report["retrieval_usage"] = self.graph_retriever.delta(before)
                 report["wall_seconds"] = time.perf_counter() - started
                 self.selection_reports[key] = report
                 self.selection_cache[key] = selected
             return list(self.selection_cache[key])
+        if method == "warp":
+            return self.selector.select("warp", self.features, self.costs, self.estimated_gains)
         return self.selector.select(
-            method, budget_fraction * self.full_graph_cost, self.features, self.costs, self.estimated_gains,
+            method, self.features, self.costs, self.estimated_gains, limit=len(self.select("warp")),
         )
 
     def search_multistep(self, query, k, search_once, *, trace=None):
@@ -414,6 +424,33 @@ class WARPG:
             self.full_graph = self.graph_builder.build_full_graph(region, self.bundle.documents)
         return self.full_graph
 
+    def generate_next_query(self, prompt: str) -> str:
+        """IRCoT 下一步查询生成；没有共享 LLM 时返回 END 以停止。"""
+        self.last_generation_usage = {}
+        llm = getattr(self.graph_builder, "_shared_llm", None)
+        tracker = getattr(self.graph_builder, "_usage_tracker", None)
+        if llm is None or not hasattr(llm, "infer"):
+            return "END"
+        previous = getattr(tracker, "phase", None) if tracker is not None else None
+        previous_context = getattr(tracker, "audit_context", None) if tracker is not None else None
+        before = tracker.get("ircot") if tracker is not None else {}
+        if tracker is not None:
+            tracker.phase = "ircot"
+            tracker.audit_context = audit_context()
+        try:
+            result = llm.infer([{"role": "user", "content": prompt}])
+        finally:
+            if tracker is not None:
+                tracker.phase = previous or "idle"
+                tracker.audit_context = previous_context or {}
+        if tracker is not None:
+            after = tracker.get("ircot")
+            self.last_generation_usage = {
+                key: after.get(key, 0) - before.get(key, 0) for key in set(after) | set(before)
+            }
+        text = result[0] if isinstance(result, tuple) and result else result
+        return str(text or "").strip()
+
     def search_full_graph(self, query: str, k: int | None = None) -> list[SearchResult]:
         k = self.config.retrieval_k if k is None else k
         return self.search_multistep(query, k, lambda q, depth, trace: self._search_full_graph_once(q, depth))
@@ -429,26 +466,27 @@ class WARPG:
             k=k, candidate_k=self.config.candidate_k, source="full_graph", trace=trace,
         )
 
-    def evaluate_full_graph(self, queries: list[Any], ks: tuple[int, ...] = (5, 10)) -> dict[str, Any]:
+    def evaluate_full_graph(self, queries: list[Any], ks: tuple[int, ...] | None = None) -> dict[str, Any]:
         """评测 Base + Full Graph fusion。"""
         self.materialize_full_graph()
         return self.evaluate_search(queries, lambda q, k, trace: self._search_full_graph_once(q, k, trace=trace), ks)
 
-    def evaluate_full_graph_only(self, queries: list[Any], ks: tuple[int, ...] = (5, 10)) -> dict[str, Any]:
+    def evaluate_full_graph_only(self, queries: list[Any], ks: tuple[int, ...] | None = None) -> dict[str, Any]:
         """评测官方图检索通路；仍使用共享 CrossEncoder。"""
         graph = self.materialize_full_graph()
         return self.evaluate_search(queries, lambda q, k, trace: fuse_and_rerank(
             q, [self.graph_retriever.search(q, graph, self.config.candidate_k)], self.reranker,
             k=k, candidate_k=self.config.candidate_k, source="hipporag2_reranked", trace=trace), ks)
 
-    def evaluate(self, queries: list[Any], selected_regions: list[str], ks: tuple[int, ...] = (5, 10)) -> dict[str, Any]:
+    def evaluate(self, queries: list[Any], selected_regions: list[str], ks: tuple[int, ...] | None = None) -> dict[str, Any]:
         """物化给定区域并保存同一次检索的候选轨迹，支持逐题消融审计。"""
         self.materialize(selected_regions)
         return self.evaluate_search(queries, lambda q, k, trace: self._search_once(
             q, k, set(selected_regions), trace=trace), ks)
 
-    def evaluate_search(self, queries, search_once, ks=(5, 10)):
+    def evaluate_search(self, queries, search_once, ks=None):
         traces = []
+        ks = tuple(self.config.retrieval_ks if ks is None else ks)
         def search(query, k):
             trace = {}
             results = self.search_multistep(query, k, search_once, trace=trace)
@@ -466,7 +504,7 @@ class WARPG:
         emit("retrieval_diagnostics", output["retrieval_traces"])
         return output
 
-    def evaluate_base(self, queries: list[Any], method: str, ks: tuple[int, ...] = (5, 10)) -> dict[str, Any]:
+    def evaluate_base(self, queries: list[Any], method: str, ks: tuple[int, ...] | None = None) -> dict[str, Any]:
         """评测 BM25、Dense 或 Hybrid 基础检索。"""
         normalized = "hybrid" if method.lower() == "base" else method.lower()
         return self.evaluate_search(queries, lambda q, k, trace: self._search_base_once(q, k, normalized, trace=trace), ks)

@@ -10,7 +10,6 @@ from unittest.mock import patch
 if importlib.util.find_spec("faiss") is None:
     sys.modules.setdefault("faiss", types.ModuleType("faiss"))
 
-from warp.advisor.selector import BudgetSelector
 from warp.eval.retrieval import evaluate_retrieval
 from warp.graph.builder import RegionalGraph
 from warp.graph.hipporag2 import HippoRAG2Config, HippoRAG2GraphBuilder
@@ -64,10 +63,19 @@ def model_fixture():
 
 
 class RegionalRetrievalTests(unittest.TestCase):
+    def test_controls_reuse_warp_region_count(self):
+        model = model_fixture()
+        model.estimated_gains["r2"] = 0.0
+        warp = model.select("warp")
+        self.assertEqual(warp, ["r0", "r1"])
+        for method in ("random_region", "frequency_only", "gain_only", "cost_only"):
+            self.assertEqual(len(model.select(method)), len(warp))
+
     def test_selector_and_evaluation_do_not_alias_methods(self):
         model = model_fixture()
-        warp = model.select(1 / 3, "warp")
-        random = model.select(1 / 3, "random_region")
+        model.estimated_gains = {"r0": 1.0, "r1": 0.0, "r2": 0.0}
+        warp = model.select("warp")
+        random = model.select("random_region")
         self.assertEqual(warp, ["r0"])
         self.assertEqual(random, ["r1"])
         query = [Query("test", "query", ["a0", "x0"])]

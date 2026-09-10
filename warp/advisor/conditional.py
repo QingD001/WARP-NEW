@@ -1,19 +1,23 @@
-"""Budgeted greedy conditional measurement with bounded pair lookahead."""
+"""Greedy conditional measurement with bounded pair lookahead; no deployment-token cutoff."""
 from itertools import combinations
 import random
 from warp.advisor.objective import utility
 from warp.audit import emit
 
 
-def select_conditional(model, budget):
+def select_conditional(model, budget=None):
     cfg = model.config
     # A common sample makes candidate gains comparable and includes collateral losses.
     queries = sorted(model.bundle.train, key=lambda q: q.id)
     if len(queries) > cfg.conditional_max_queries:
         queries = sorted(random.Random(cfg.seed).sample(queries, cfg.conditional_max_queries), key=lambda q: q.id)
-    candidates = sorted((r for r in model.probes if model.costs[r] <= budget + 1e-9), key=lambda key: (
-        -model.features[key].query_freq * max(model.estimated_gains[key], 0) / model.costs[key], key))[:cfg.conditional_candidates]
+    ranked = sorted(model.probes, key=lambda key: (
+        -model.features[key].query_freq * max(model.estimated_gains[key], 0) / model.costs[key], key))
+    if budget is not None:
+        ranked = [region_id for region_id in ranked if model.costs[region_id] <= budget + 1e-9]
+    candidates = ranked[:cfg.conditional_candidates]
     cache, records, selected = {}, [], set()
+
     def measure(regions):
         key = tuple(sorted(regions))
         if key not in cache:
@@ -27,7 +31,8 @@ def select_conditional(model, budget):
             cache[key] = rows
             emit("conditional_measurement", {"selected_regions": key, "per_query": rows})
         return cache[key]
-    if budget <= 0 or not candidates:
+
+    if not candidates:
         return [], {"rounds": [], "evaluated_sets": 0, "sample_query_ids": []}
     for _ in range(cfg.conditional_rounds):
         base = measure(selected)
@@ -39,7 +44,7 @@ def select_conditional(model, budget):
         scored = []
         for addition in proposals:
             cost = sum(model.costs[r] for r in addition)
-            if spent + cost > budget + 1e-9:
+            if budget is not None and spent + cost > budget + 1e-9:
                 continue
             proposed = selected | set(addition)
             if tuple(sorted(proposed)) not in cache and len(cache) >= cfg.conditional_max_evaluations:

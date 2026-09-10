@@ -6,21 +6,17 @@
 
 ## 1. 本方法是什么
 
-WARP-G（Workload-Aware Regional Physical Graph materialization）解决的是**离线预算下应当为哪些语料区域构建昂贵
+WARP-G（Workload-Aware Regional Physical Graph materialization）解决的是**应当为哪些语料区域构建昂贵
 GraphRAG 索引**的问题。它先用 design workload 构建文档共访问图并做 Leiden 分区，只构建少量 HippoRAG2 probe
-graphs，学习每个 region 的预期检索收益，再按
-
-```text
-query_frequency × max(predicted_gain, 0) / estimated_graph_cost
-```
-
-选择区域。在线查询先经过共享 BM25 + Dense router，只访问已物化且与问题相关的区域图。正式协议在每个数据集的
+graphs，测量每个 region 的检索收益，再按方法自身规则选出区域（独立模式 `score>0`，条件模式边际 gain>0）。
+部署阶段不施加 token 预算截断；主表比较完整 pipeline 的质量与实际 tokens。在线查询先经过共享 BM25 + Dense
+router，只访问已物化且与问题相关的区域图。正式协议在每个数据集的
 1,000 条 released queries 上做确定性 5-fold cross-fitting；每折 800 条只用于物理设计，200 条只用于测试，每条问题
 恰好被 held out 一次。
 
-WARP-G 与大多数 GraphRAG 工作的根本区别不是“发明另一种 KG 抽取器”，而是把 GraphRAG 看成一个 workload-aware、
-budgeted physical-design 问题。当前图能力来自锁定 commit 的官方 HippoRAG2，贡献点位于 region 形成、低成本 probe、
-收益预测、预算选择和在线路由。
+WARP-G 与大多数 GraphRAG 工作的根本区别不是“发明另一种 KG 抽取器”，而是把 GraphRAG 看成一个 workload-aware
+physical-design 问题，并用实际构图 tokens 评价选择性部署。当前图能力来自锁定 commit 的官方 HippoRAG2，贡献点位于
+region 形成、低成本 probe、收益估计、区域选择和在线路由。
 
 ## 2. 当前代码中已经进入正式实验的方法
 
@@ -28,19 +24,19 @@ budgeted physical-design 问题。当前图能力来自锁定 commit 的官方 H
 |---|---|---|---|
 | BM25 | 无图参考线 | 本仓库实现 | 只利用词项匹配，不构图、无 workload 设计。 |
 | Dense | 无图参考线 | HippoRAG2 passage encoder + 本仓库检索器 | 只利用向量相似度，不利用图传播。 |
-| Hybrid | WARP-G 的共享 Base | 本仓库 BM25 + Dense + RRF | 覆盖全语料但没有 KG；也是零图预算点。 |
+| Hybrid | WARP-G 的共享 Base | 本仓库 BM25 + Dense + RRF | 覆盖全语料但没有 KG；也是不部署区域图时的共同退回点。 |
 | HippoRAG2 graph-only | 全图参考线 | **官方代码**：[OSU-NLP-Group/HippoRAG](https://github.com/OSU-NLP-Group/HippoRAG) | 全语料构建一个 KG，只走图检索；不按 workload 选择。 |
-| Base + Full Graph | 全图上界参考线 | 官方 HippoRAG2 + 本仓库融合/rerank | 全语料单图保留跨 region 边，不受预算约束。 |
-| KET-RAG | 匹配预算的全局稀疏图 baseline | 本仓库适配性复现；论文有官方代码 | 先用全局 chunk KNN/PageRank 选 core chunks，再建 skeleton KG，并用轻量 keyword graph 补覆盖；不是 workload region 选择。 |
-| G2ConS | 匹配预算的全局稀疏图 baseline | 本仓库适配性复现；**未找到官方代码** | 用 concept co-occurrence graph、Dice/PageRank 选 core chunks，并以 concept graph 补覆盖；不学习 region-level workload gain。 |
-| Random-region | 新增选择器消融 | 本仓库实现 | 相同 regions、后端和预算，固定 seed 随机排序，检验 WARP-G 是否优于随机物化。 |
-| Frequency-only | 新增选择器消融 | 本仓库实现 | 只按 design workload 中的 query frequency 排序，不看预测收益/成本比。 |
-| Gain-only | 新增选择器消融 | 本仓库实现 | 只按预测增益排序，不做 workload frequency 与 cost normalization。 |
-| Cost-only | 新增选择器消融 | 本仓库实现 | 从最便宜的 region 开始填预算，不看需求与质量收益。 |
+| Base + Full Graph | 全图上界参考线 | 官方 HippoRAG2 + 本仓库融合/rerank | 全语料单图保留跨 region 边，不受区域选择约束。 |
+| KET-RAG | 原生 core 比例的全局稀疏图 baseline | 本仓库适配性复现；论文有官方代码 | 先用全局 chunk KNN/PageRank 按文档比例选 core chunks，再建 skeleton KG，并用轻量 keyword graph 补覆盖；不是 workload region 选择。 |
+| G2ConS | 原生 core 比例的全局稀疏图 baseline | 本仓库适配性复现；**未找到官方代码** | 用 concept co-occurrence graph、Dice/PageRank 按文档比例选 core chunks，并以 concept graph 补覆盖；不学习 region-level workload gain。 |
+| Random-region | 新增选择器消融 | 本仓库实现 | 相同 regions、后端，并对齐 WARP 选区个数，固定 seed 随机排序。 |
+| Frequency-only | 新增选择器消融 | 本仓库实现 | 只按 design workload 中的 query frequency 排序，截到与 WARP 相同个数。 |
+| Gain-only | 新增选择器消融 | 本仓库实现 | 只按实测增益排序，截到与 WARP 相同个数。 |
+| Cost-only | 新增选择器消融 | 本仓库实现 | 从最便宜的 region 开始取与 WARP 相同个数，不看需求与质量收益。 |
 | WARP-G | 主方法 | 本仓库实现 | 同时建模访问频率、预测收益和物化成本，并只部署预测为正收益的区域。 |
 
-四个选择器消融已经加入四份 `configs/paper/*.yaml` 的六点预算曲线，并自动进入逐题配对显著性检验。它们复用
-WARP-G 形成的同一组 regions，因而回答的是“选择公式是否有效”，不是“另一套 GraphRAG 后端是否更强”。
+四个选择器消融已经加入四份 `configs/paper/*.yaml` 的完整 pipeline 主表，并自动进入逐题配对显著性检验。它们复用
+WARP-G 形成的同一组 regions，并对齐 WARP 选出的区域个数，因而回答的是“选择公式是否有效”，不是“另一套 GraphRAG 后端是否更强”。
 
 ## 3. 两个新增的作者官方端到端对照
 
@@ -62,11 +58,11 @@ LinearRAG 用轻量实体识别和语义连接构建 relation-free Tri-Graph，�
 - 本仓库锁定 commit：`d49112fb7548ee14cb727d43bd68e34da0a2c942`
 
 LightRAG 建立实体—关系图，并提供 local/global/hybrid/mix 多粒度检索。它的主要目标是轻量、增量、通用的完整
-GraphRAG 系统；WARP-G 则把固定图后端的物化范围作为 workload-aware 预算决策。当前接入使用官方 SDK 的 `hybrid`
+GraphRAG 系统；WARP-G 则把固定图后端的物化范围作为 workload-aware 物理设计决策。当前接入使用官方 SDK 的 `hybrid`
 模式，在同一完整 corpus 和全部 1,000 条问题上报告答案 EM/F1、构建时间和查询时间。
 
-这两个系统不会混入 WARP-G 的 `actual_cost_fraction` 曲线，因为它们的构图单元、embedding/LLM 调用和检索器都不同，
-不存在诚实的一一对应 region budget。它们作为独立的 end-to-end 表更合理。
+这两个系统不会混入 WARP-G 的实际 token 主表，因为它们的构图单元、embedding/LLM 调用和检索器都不同，
+不存在诚实的一一对应区域选择成本。它们作为独立的 end-to-end 表更合理。
 
 ## 4. KET-RAG 与 G2ConS：论文方法、代码状态和当前适配差异
 
@@ -77,7 +73,7 @@ GraphRAG 系统；WARP-G 则把固定图后端的物化范围作为 workload-awa
 
 原方法通过 chunk KNN 图和 PageRank 找到核心 chunks，仅为核心部分抽取 KG skeleton，再构建廉价的 text-keyword
 bipartite graph 保持全局覆盖。当前仓库保留这些关键机制，但把核心 KG 统一换成与 WARP-G 相同的 HippoRAG2 builder，
-并统一 Base、candidate depth、RRF、CrossEncoder、预算分母和成本记账。因此它是适合做**受控算法比较**的 matched-backend
+并统一 Base、candidate depth、RRF、CrossEncoder 和成本记账。因此它是适合做**受控算法比较**的 matched-backend
 适配，不是作者仓库逐行复现。论文中应写成 “KET-RAG-style, adapted to the shared HippoRAG2 backend”，同时可把作者
 官方端到端结果放进补充材料，避免混称。
 
@@ -187,21 +183,21 @@ observed design workload
 | [Workload-Aware Materialization of Junction Trees](https://arxiv.org/abs/2110.03475) | 为概率查询选择 junction-tree 物化结果 | 根据 workload 选择可复用结构以加速未来查询 | 面向 Bayesian inference，并给出专用优化算法和近似分析 | workload-aware materialization 术语及总体目标不能声称首次提出 |
 | [Materialized View Selection for Regular Path Queries](https://doi.org/10.1145/3654955) | 在存储预算下为 graph RPQ workload 选择共享子查询视图 | 频率、收益、物化成本和预算共同决定选择 | 优化已有图上的 path-query execution，不构建文本 GraphRAG，也不优化答案/evidence 质量 | WARP-G 的选择问题属于已有 physical-design 家族 |
 
-这些工作说明，WARP-G 的单个组成部分——Leiden、LightGBM、probe sampling、greedy benefit/cost ranking——都不应独立
+这些工作说明，WARP-G 的单个组成部分——Leiden、probe sampling、greedy benefit/cost ranking——都不应独立
 包装为算法首创。合理的新颖性来自把数据库 physical-design 视角引入昂贵 GraphRAG indexing，并解决该场景特有的
 区域效用观测、图后端构建、跨区域损失、查询路由和 QA 质量—成本联合评测问题。
 
 ### 新颖性结论与安全声明
 
 截至 2026-08-23，没有检索到同时实现“真实历史 QA workload、原始文档共访问分区、少量真实 GraphRAG probes、区域
-边际收益学习、全局预算区域图物化、held-out 查询路由评测”的公开工作。这支持的是**问题定义与系统闭环的新颖性**，
+边际收益测量、区域图物化、held-out 查询路由评测”的公开工作。这支持的是**问题定义与系统闭环的新颖性**，
 而不是每个优化组件的新颖性。
 
 论文可谨慎写：
 
 > To our knowledge, WARP-G is the first framework to study workload-aware regional physical design for expensive
 > GraphRAG indexing: it estimates regional marginal graph utility from selective probes and materializes regional
-> graph indices under a global construction budget.
+> graph indices according to realized gain, reporting actual construction tokens rather than a matched token budget.
 
 论文不应写成 `first cost-efficient GraphRAG`、`first selective graph construction`、`first adaptive/budget-aware RAG`、
 `first workload-aware graph partitioning` 或 `first learned materialization method`。正式投稿前还应按投稿截止日期重新检索，
@@ -333,7 +329,7 @@ WARP-G 的输入是文档 corpus，其问题是选择构建哪些 regional KGs�
 
 | 实验表 | 应放方法 | 原因 |
 |---|---|---|
-| 同后端 budget–quality 主表 | KET-RAG-style、G2ConS-style、四个选择器消融、WARP-G | 共享 corpus、HippoRAG2、Base、reranker、预算分母，可归因比较。 |
+| 同后端质量–实际 tokens 主表 | KET-RAG-style、G2ConS-style、四个选择器消融、WARP-G | 共享 corpus、HippoRAG2、Base、reranker；对照对齐区域个数或各自原生 core 比例，主报实际 tokens。 |
 | 无图/全图参考表 | BM25、Dense、Hybrid、HippoRAG2 graph-only、Base + Full Graph | 给出零图底座和全量图边界。 |
 | 独立官方端到端表 | LinearRAG、LightRAG | 官方实现真实可跑，但构建单元和成本定义不同；报告 EM/F1、wall time、模型/API 配置。 |
 | 后续机制消融 | EA-GraphRAG-style query gate、k-core partition | 与 WARP-G 正交且能直接检验 routing/partition 假设，但不能写成官方复现。 |

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import gc
 import hashlib
 import importlib.metadata
@@ -23,9 +24,10 @@ import torch
 
 from warp.baselines import GlobalBaselineFactory
 from warp.data import load_crossfit_bundles
-from warp.eval.construction_cost import aggregate_costs
+from warp.eval.construction_cost import aggregate_costs, attach_token_efficiency, token_efficiency
+from warp.eval.cutoffs import metric_names
+from warp.eval.multistep import run_multistep_retrieval
 from warp.eval.reader import evaluate_hipporag2_reader
-from warp.eval.retrieval import evaluate_retrieval
 from warp.eval.statistics import paired_bootstrap_interval, paired_randomization_pvalue
 from warp.graph import HippoRAG2Config, HippoRAG2GraphBuilder, HippoRAG2GraphRetriever
 from warp.graph.hipporag2 import SUPPORTED_API_VERSION, UPSTREAM_COMMIT, UPSTREAM_REPOSITORY
@@ -35,7 +37,11 @@ from warp.retrieval import BM25Retriever, CrossEncoderReranker, DenseRetriever, 
 from warp.utils import write_json
 
 
-METRICS = ("evidence_recall@5", "evidence_recall@10", "complete_evidence@5", "complete_evidence@10")
+METRICS = metric_names()
+TOKEN_EFFICIENCY_KEYS = (
+    "total_tokens_excluding_design", "total_tokens_including_design",
+    "token_efficiency_excluding_design", "token_efficiency_including_design",
+)
 REGIONAL_METHODS = {"warp", "random_region", "frequency_only", "gain_only", "cost_only"}
 GLOBAL_METHODS = {"ket_rag", "g2cons"}
 
@@ -45,6 +51,73 @@ def _audited(call, **labels):
         value = call()
         emit("evaluation_result", value)
         return value
+
+
+def _apply_run_overrides(config: dict[str, Any], *, skip_multistep: bool = False) -> dict[str, Any]:
+    if not skip_multistep:
+        return config
+    updated = copy.deepcopy(config)
+    updated.setdefault("warp", {})["multistep_max_steps"] = 0
+    return updated
+
+
+def _trace_search(search_once: Any) -> Any:
+    def wrapped(query: str, k: int) -> tuple[Any, dict[str, Any]]:
+        trace: dict[str, Any] = {}
+        return search_once(query, k, trace), trace
+    return wrapped
+
+
+def _plain_search(search: Any) -> Any:
+    def wrapped(query: str, k: int) -> tuple[Any, dict[str, Any]]:
+        return search(query, k), {}
+    return wrapped
+
+
+def _with_usage_trace(search_trace: Any, retriever: Any) -> Any:
+    def wrapped(query: str, k: int) -> tuple[Any, dict[str, Any]]:
+        before = retriever.stats() if retriever is not None else {}
+        results, trace = search_trace(query, k)
+        payload = dict(trace or {})
+        if retriever is not None:
+            payload["tokens"] = retriever.delta(before)
+        return results, payload
+    return wrapped
+
+
+def _ircot_generate(model: WARPG) -> Any:
+    def generate(prompt: str) -> str:
+        text = model.generate_next_query(prompt)
+        generate.last_usage = dict(getattr(model, "last_generation_usage", {}) or {})
+        return text
+    generate.last_usage = {}
+    return generate
+
+
+def _attach_multistep(
+    metrics: dict[str, Any], *, method: str, search_trace: Any, model: WARPG,
+    queries: Any, log_dir: Path | None, documents: Any,
+) -> dict[str, Any]:
+    """IRCoT 对照：不改写主路径 retrieved_doc_ids，问答仍用第一遍检索。"""
+    steps = int(model.config.multistep_max_steps)
+    if steps <= 0:
+        return metrics
+    log_path = None if log_dir is None else log_dir / f"{method}.jsonl"
+    doc_map = {doc.id: doc for doc in documents} if documents is not None else None
+    summary = run_multistep_retrieval(
+        queries,
+        _with_usage_trace(search_trace, getattr(model, "graph_retriever", None)),
+        _ircot_generate(model),
+        max_steps=steps,
+        retrieval_k=int(model.config.retrieval_k),
+        ks=tuple(model.config.retrieval_ks),
+        log_path=log_path,
+        method=method,
+        documents=doc_map,
+        snippet_chars=int(model.config.feedback_chars),
+    )
+    metrics["multistep"] = {key: value for key, value in summary.items() if key != "ranked_results"}
+    return metrics
 
 
 def load_config(path: str) -> dict[str, Any]:
@@ -130,6 +203,14 @@ def _summarize(
             samples = [float(row["actual_cost_fraction"]) for row in values]
             item["actual_cost_fraction_mean"] = statistics.fmean(samples)
             item["actual_cost_fraction_std"] = statistics.stdev(samples) if len(samples) > 1 else 0.0
+        for key in TOKEN_EFFICIENCY_KEYS:
+            if key not in values[0] or values[0][key] is None:
+                continue
+            samples = [row[key] for row in values if row.get(key) is not None]
+            if not samples:
+                continue
+            item[f"{key}_mean"] = statistics.fmean(samples)
+            item[f"{key}_std"] = statistics.stdev(samples) if len(samples) > 1 else 0.0
         output.append(item)
     return output
 
@@ -163,6 +244,15 @@ def _crossfit_summary(
             costs = [float(row["actual_cost_fraction"]) for row in values]
             item["actual_cost_fraction_mean"] = statistics.fmean(costs)
             item["actual_cost_fraction_std"] = statistics.stdev(costs) if len(costs) > 1 else 0.0
+        if "total_tokens_excluding_design" in values[0]:
+            excluding = sum(int(row.get("total_tokens_excluding_design") or 0) for row in values)
+            including = sum(int(row.get("total_tokens_including_design") or 0) for row in values)
+            item["total_tokens_excluding_design"] = excluding
+            item["total_tokens_including_design"] = including
+            evidence = item.get("complete_evidence@10")
+            if evidence is not None:
+                item["token_efficiency_excluding_design"] = token_efficiency(float(evidence), excluding)
+                item["token_efficiency_including_design"] = token_efficiency(float(evidence), including)
         output.append(item)
     return output
 
@@ -171,41 +261,37 @@ def _significance(rows: list[dict[str, Any]], samples: int, seed: int) -> list[d
     if not any(row["method"] == "warp" for row in rows):
         return []
     output: list[dict[str, Any]] = []
-    budgets = sorted({float(row["budget_fraction"]) for row in rows})
     references = sorted({str(row["method"]) for row in rows if row["method"] != "warp"})
-    for budget in budgets:
-        candidate_rows = [row for row in rows if row["method"] == "warp"
-                          and float(row["budget_fraction"]) == budget]
-        candidate_per_query = {
+    candidate_rows = [row for row in rows if row["method"] == "warp"]
+    candidate_per_query = {
+        query_id: values
+        for row in candidate_rows for query_id, values in row["per_query"].items()
+    }
+    for reference_name in references:
+        reference_rows = [row for row in rows if row["method"] == reference_name]
+        reference_per_query = {
             query_id: values
-            for row in candidate_rows for query_id, values in row["per_query"].items()
+            for row in reference_rows for query_id, values in row["per_query"].items()
         }
-        for reference_name in references:
-            reference_rows = [row for row in rows if row["method"] == reference_name
-                              and float(row["budget_fraction"]) == budget]
-            reference_per_query = {
-                query_id: values
-                for row in reference_rows for query_id, values in row["per_query"].items()
-            }
-            query_ids = sorted(candidate_per_query)
-            if set(query_ids) != set(reference_per_query):
-                raise ValueError("Cross-fit significance requires identical held-out query coverage")
-            for metric in METRICS:
-                candidate = [candidate_per_query[query_id][metric] for query_id in query_ids]
-                baseline = [reference_per_query[query_id][metric] for query_id in query_ids]
-                output.append({
-                    "design_seed": seed,
-                    "cross_fitting_folds": len(candidate_rows),
-                    "num_queries": len(query_ids),
-                    "budget_fraction": budget,
-                    "candidate": "warp",
-                    "reference": reference_name,
-                    "metric": metric,
-                    "mean_difference": statistics.fmean(left - right for left, right in zip(candidate, baseline)),
-                    "paired_randomization_pvalue": paired_randomization_pvalue(
-                        candidate, baseline, samples=samples, seed=seed,
-                    ),
-                })
+        query_ids = sorted(candidate_per_query)
+        if set(query_ids) != set(reference_per_query):
+            raise ValueError("Cross-fit significance requires identical held-out query coverage")
+        for metric in METRICS:
+            candidate = [candidate_per_query[query_id][metric] for query_id in query_ids]
+            baseline = [reference_per_query[query_id][metric] for query_id in query_ids]
+            output.append({
+                "design_seed": seed,
+                "cross_fitting_folds": len(candidate_rows),
+                "num_queries": len(query_ids),
+                "selection": "full_pipeline",
+                "candidate": "warp",
+                "reference": reference_name,
+                "metric": metric,
+                "mean_difference": statistics.fmean(left - right for left, right in zip(candidate, baseline)),
+                "paired_randomization_pvalue": paired_randomization_pvalue(
+                    candidate, baseline, samples=samples, seed=seed,
+                ),
+            })
     for metric in METRICS:
         group = [row for row in output if row["metric"] == metric]
         ordered = sorted(group, key=lambda row: float(row["paired_randomization_pvalue"]))
@@ -223,9 +309,11 @@ def _quality_cost_auc(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for method in methods:
         method_rows = [row for row in rows if row["method"] == method]
+        grouping = "budget_fraction" if any("budget_fraction" in row for row in method_rows) else "selection"
         budget_points: list[tuple[float, dict[str, float]]] = []
-        for budget in sorted({float(row["budget_fraction"]) for row in method_rows}):
-            trials = [row for row in method_rows if float(row["budget_fraction"]) == budget]
+        keys = sorted({row.get(grouping, "full_pipeline") for row in method_rows}, key=lambda value: str(value))
+        for key in keys:
+            trials = [row for row in method_rows if row.get(grouping, "full_pipeline") == key]
             cost = statistics.fmean(float(row["actual_cost_fraction"]) for row in trials)
             metrics = {metric: statistics.fmean(float(row[metric]) for row in trials) for metric in METRICS}
             budget_points.append((cost, metrics))
@@ -244,22 +332,25 @@ def _quality_cost_auc(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "points": [{"actual_cost_fraction": cost, **metrics} for cost, metrics in points],
         }
         for metric in METRICS:
-            item[f"{metric}_auc"] = sum(
-                (right_cost - left_cost) * (left_metrics[metric] + right_metrics[metric]) / 2.0
-                for (left_cost, left_metrics), (right_cost, right_metrics) in zip(points, points[1:])
-            )
+            if len(points) < 2:
+                item[f"{metric}_auc"] = None
+            else:
+                item[f"{metric}_auc"] = sum(
+                    (right_cost - left_cost) * (left_metrics[metric] + right_metrics[metric]) / 2.0
+                    for (left_cost, left_metrics), (right_cost, right_metrics) in zip(points, points[1:])
+                )
         output.append(item)
     return output
 
 
 def _probe_design_costs(model: WARPG, method: str, selected: list[str],
-                        graph_config: dict[str, Any], budget_fraction: float | None = None) -> tuple[ConstructionCost, ConstructionCost]:
+                        graph_config: dict[str, Any], selection_key: str = "full_pipeline") -> tuple[ConstructionCost, ConstructionCost]:
     """Return total design cost and incremental cost excluding deployed probe graphs."""
     if method not in {"warp", "gain_only"}:
         return ConstructionCost(), ConstructionCost()
     usage = dict(model.design_retrieval_usage)
-    if method == "warp" and budget_fraction is not None:
-        extra = model.selection_reports.get(str(float(budget_fraction)), {}).get("retrieval_usage", {})
+    if method == "warp":
+        extra = model.selection_reports.get(selection_key, {}).get("retrieval_usage", {})
         for key in ("logical_input_tokens", "logical_output_tokens", "wall_seconds"):
             usage[key] = usage.get(key, 0) + extra.get(key, 0)
     input_tokens = int(usage.get("logical_input_tokens", 0))
@@ -288,21 +379,24 @@ def _reader_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return output
 
 
-def _run_fold_experiment(config: dict[str, Any], bundle: Any, fold: int) -> dict[str, Any]:
+def _run_fold_experiment(
+    config: dict[str, Any], bundle: Any, fold: int, checkpoint_dir: Path | None = None,
+) -> dict[str, Any]:
     required = ("dataset", "warp", "graph", "reranker", "experiment", "reader")
     missing = [name for name in required if not isinstance(config.get(name), dict)]
     if missing:
         raise ValueError(f"Missing experiment configuration sections: {', '.join(missing)}")
     experiment = config["experiment"]
     for required_key in (
-        "budgets", "methods", "seed", "randomization_samples",
+        "methods", "seed", "randomization_samples",
         "partition_ablations",
     ):
         if required_key not in experiment:
             raise ValueError(f"experiment.{required_key} is required")
-    budgets = [float(value) for value in experiment["budgets"]]
-    if not budgets or len(set(budgets)) != len(budgets) or any(not 0.0 <= value <= 1.0 for value in budgets):
-        raise ValueError("All budget fractions must be in [0, 1]")
+    if "budgets" in experiment:
+        print(json.dumps({
+            "warning": "experiment.budgets is ignored; each method runs its full native pipeline",
+        }, ensure_ascii=False), flush=True)
     methods = [str(value).lower() for value in experiment["methods"]]
     if not methods or len(set(methods)) != len(methods):
         raise ValueError("Experiment methods must be non-empty and unique")
@@ -325,6 +419,8 @@ def _run_fold_experiment(config: dict[str, Any], bundle: Any, fold: int) -> dict
         factory = GlobalBaselineFactory(
             bundle.documents, model.base, model.graph_builder, model.graph_retriever,
             model.reranker, model.config.candidate_k,
+            ket_core_fraction=float(experiment.get("ket_core_fraction", 0.8)),
+            g2_core_fraction=float(experiment.get("g2_core_fraction", 0.8)),
         ) if (set(methods) | (set(config["reader"]["methods"]) if config["reader"]["enabled"] else set())) & GLOBAL_METHODS else None
         design_reports.append({
             "design_seed": design_seed, "fold": fold,
@@ -335,109 +431,149 @@ def _run_fold_experiment(config: dict[str, Any], bundle: Any, fold: int) -> dict
         emit("physical_design", design_reports[-1])
         reader_config = config["reader"]
         reader_methods = {str(value).lower() for value in reader_config["methods"]} if reader_config["enabled"] else set()
-        reader_budget = float(reader_config["budget"])
         reader_k = int(reader_config["top_k"])
-        evaluation_ks = tuple(sorted({5, 10, reader_k})) if reader_methods else (5, 10)
+        evaluation_ks = tuple(sorted(set(model.config.retrieval_ks) | ({reader_k} if reader_methods else set())))
         reader_done = set()
         pending_readers = {}
+        multistep_dir = (
+            Path(checkpoint_dir) / "multistep" / f"fold-{fold}"
+            if checkpoint_dir is not None else None
+        )
 
-        def maybe_reader(method, metrics, budget=None):
-            if method not in reader_methods or (budget is not None and budget != reader_budget):
-                return
-            if method in reader_done:
+        def maybe_reader(method, metrics):
+            if method not in reader_methods or method in reader_done:
                 return
             reader_backend = next(iter(model.graphs.values()), None) or model.full_graph
             if reader_backend is None:
-                pending_readers[method] = (metrics, budget)
+                pending_readers[method] = metrics
                 return
-            with audit_scope(method=method, budget_fraction=budget, stage="reader"):
+            with audit_scope(method=method, selection="full_pipeline", stage="reader"):
                 # QA only needs the shared LLM/config, not a corpus-wide graph.
                 scored = evaluate_hipporag2_reader(bundle.test, None, bundle.documents, reader_backend, reader_k,
                                                    retrieved_doc_ids=metrics["retrieved_doc_ids"])
                 reader_trials.append({"design_seed": design_seed, "fold": fold, "method": method,
-                                      "budget_fraction": budget, **scored})
+                                      "selection": "full_pipeline", **scored})
                 emit("reader_result", reader_trials[-1])
             reader_done.add(method)
 
         for method in ("bm25", "dense", "hybrid"):
             before = graph_retriever.stats()
             metrics = _audited(lambda: model.evaluate_base(bundle.test, method, evaluation_ks), method=method, stage="test")
+            online = graph_retriever.delta(before)
+            maybe_reader(method, metrics)
+            metrics = _attach_multistep(
+                metrics, method=method,
+                search_trace=_trace_search(
+                    lambda query, k, trace, method=method: model._search_base_once(query, k, method, trace=trace)
+                ),
+                model=model, queries=bundle.test, log_dir=multistep_dir, documents=bundle.documents,
+            )
             baseline_trials.append({
                 "design_seed": design_seed, "fold": fold, "method": method,
-                "online_retrieval_cost": graph_retriever.delta(before), **metrics,
+                "online_retrieval_cost": online, **metrics,
             })
-            maybe_reader(method, metrics)
 
         seed_rows: list[dict[str, Any]] = []
-        for budget in budgets:
-            for method in methods:
-                before = graph_retriever.stats()
-                if method in REGIONAL_METHODS:
-                    selected = model.select(budget, method)
-                    before = graph_retriever.stats()  # design calls are not test retrieval
-                    metrics = _audited(lambda: model.evaluate(bundle.test, selected, evaluation_ks),
-                                       method=method, budget_fraction=budget, stage="test")
-                    deployment_cost = aggregate_costs([model.graphs[key].cost for key in selected])
-                    selected_ids: dict[str, Any] = {"selected_regions": selected}
-                    estimated_cost = sum(model.costs[key] for key in selected)
-                else:
-                    if factory is None:
-                        raise RuntimeError("Global baseline factory was not initialized")
-                    baseline = factory.build(method, budget * model.full_graph_cost)
-                    metrics = _audited(lambda: model.evaluate_search(
-                        bundle.test, lambda text, depth, trace: baseline.search(text, depth), evaluation_ks),
-                        method=method, budget_fraction=budget, stage="test")
-                    deployment_cost = baseline.cost
-                    selected_ids = {
-                        "selected_documents": baseline.graph.doc_ids if baseline.graph is not None else [],
-                    }
-                    estimated_cost = (
-                        sum(factory.doc_costs[key] for key in selected_ids["selected_documents"])
-                        + (baseline.lightweight.cost.selection_cost if baseline.lightweight is not None else 0.0)
+        for method in methods:
+            before = graph_retriever.stats()
+            ircot_search = None
+            if method in REGIONAL_METHODS:
+                selected = model.select(method)
+                selected_set = set(selected)
+                before = graph_retriever.stats()  # design calls are not test retrieval
+                metrics = _audited(lambda: model.evaluate(bundle.test, selected, evaluation_ks),
+                                   method=method, selection="full_pipeline", stage="test")
+                deployment_cost = aggregate_costs([model.graphs[key].cost for key in selected])
+                selected_ids: dict[str, Any] = {"selected_regions": selected}
+                estimated_cost = sum(model.costs[key] for key in selected)
+                ircot_search = _trace_search(
+                    lambda query, k, trace, selected_set=selected_set: model._search_once(
+                        query, k, selected_set, trace=trace
                     )
-                design_search_cost, incremental_design_cost = _probe_design_costs(
-                    model, method, selected_ids.get("selected_regions", []), config["graph"], budget_fraction=budget,
                 )
-                first_run_cost = aggregate_costs([deployment_cost, incremental_design_cost])
-                if method in {"warp", "gain_only"}:
-                    method_design_wall = sum(model.design_timings.values()) - model.design_timings["base_index_seconds"]
-                else:
-                    method_design_wall = 0.0
-                selection_report = model.selection_reports.get(str(float(budget)), {}) if method == "warp" else {}
-                method_design_wall += max(0.0, selection_report.get("wall_seconds", 0) - selection_report.get("retrieval_usage", {}).get("wall_seconds", 0))
-                seed_rows.append({
-                    "method": method,
-                    "design_seed": design_seed,
-                    "fold": fold,
-                    "budget_fraction": budget,
-                    **selected_ids,
-                    "conditional_design": selection_report,
-                    "retrieval_steps_limit": model.config.retrieval_steps,
-                    "selected_estimated_graph_cost": estimated_cost,
-                    "deployment_cost": deployment_cost.to_dict(),
-                    "design_search_cost": design_search_cost.to_dict(),
-                    "incremental_design_cost": incremental_design_cost.to_dict(),
-                    "first_run_cost_including_probe": first_run_cost.to_dict(),
-                    "method_specific_design_wall_seconds": method_design_wall,
-                    "first_run_wall_seconds": first_run_cost.wall_seconds + method_design_wall,
-                    "online_retrieval_cost": graph_retriever.delta(before),
-                    **metrics,
-                })
-                emit("method_cost", {key: value for key, value in seed_rows[-1].items()
-                                     if key not in {"per_query", "retrieval_traces", "retrieved_doc_ids"}})
-                maybe_reader(method, metrics, budget)
+            else:
+                if factory is None:
+                    raise RuntimeError("Global baseline factory was not initialized")
+                baseline = factory.build(method)
+                metrics = _audited(lambda: model.evaluate_search(
+                    bundle.test, lambda text, depth, trace: baseline.search(text, depth), evaluation_ks),
+                    method=method, selection="full_pipeline", stage="test")
+                deployment_cost = baseline.cost
+                selected_ids = {
+                    "selected_documents": baseline.graph.doc_ids if baseline.graph is not None else [],
+                    "core_fraction": (
+                        factory.ket_core_fraction if method == "ket_rag" else factory.g2_core_fraction
+                    ),
+                }
+                estimated_cost = (
+                    sum(factory.doc_costs[key] for key in selected_ids["selected_documents"])
+                    + (baseline.lightweight.cost.selection_cost if baseline.lightweight is not None else 0.0)
+                )
+                ircot_search = _plain_search(baseline.search)
+            design_search_cost, incremental_design_cost = _probe_design_costs(
+                model, method, selected_ids.get("selected_regions", []), config["graph"],
+            )
+            first_run_cost = aggregate_costs([deployment_cost, incremental_design_cost])
+            if method in {"warp", "gain_only"}:
+                method_design_wall = sum(model.design_timings.values()) - model.design_timings["base_index_seconds"]
+            else:
+                method_design_wall = 0.0
+            selection_report = model.selection_reports.get("full_pipeline", {}) if method == "warp" else {}
+            method_design_wall += max(0.0, selection_report.get("wall_seconds", 0) - selection_report.get("retrieval_usage", {}).get("wall_seconds", 0))
+            online = graph_retriever.delta(before)
+            maybe_reader(method, metrics)
+            metrics = _attach_multistep(
+                metrics, method=method, search_trace=ircot_search, model=model,
+                queries=bundle.test, log_dir=multistep_dir, documents=bundle.documents,
+            )
+            seed_rows.append({
+                "method": method,
+                "design_seed": design_seed,
+                "fold": fold,
+                "selection": "full_pipeline",
+                **selected_ids,
+                "conditional_design": selection_report,
+                "retrieval_steps_limit": model.config.retrieval_steps,
+                "selected_estimated_graph_cost": estimated_cost,
+                "deployment_cost": deployment_cost.to_dict(),
+                "design_search_cost": design_search_cost.to_dict(),
+                "incremental_design_cost": incremental_design_cost.to_dict(),
+                "first_run_cost_including_probe": first_run_cost.to_dict(),
+                "method_specific_design_wall_seconds": method_design_wall,
+                "first_run_wall_seconds": first_run_cost.wall_seconds + method_design_wall,
+                "online_retrieval_cost": online,
+                **metrics,
+            })
+            emit("method_cost", {key: value for key, value in seed_rows[-1].items()
+                                 if key not in {"per_query", "retrieval_traces", "retrieved_doc_ids",
+                                                "ranked_results", "multistep"}})
 
         before = graph_retriever.stats()
         full_metrics = _audited(lambda: model.evaluate_full_graph(bundle.test, evaluation_ks), method="full_graph", stage="test")
         full_online = graph_retriever.delta(before)
-        for pending_method, (pending_metrics, pending_budget) in list(pending_readers.items()):
-            maybe_reader(pending_method, pending_metrics, pending_budget)
+        for pending_method, pending_metrics in list(pending_readers.items()):
+            maybe_reader(pending_method, pending_metrics)
         pending_readers.clear()
         maybe_reader("full_graph", full_metrics)
+        full_metrics = _attach_multistep(
+            full_metrics, method="full_graph",
+            search_trace=_trace_search(lambda query, k, trace: model._search_full_graph_once(query, k, trace=trace)),
+            model=model, queries=bundle.test, log_dir=multistep_dir, documents=bundle.documents,
+        )
         before = graph_retriever.stats()
         graph_metrics = _audited(lambda: model.evaluate_full_graph_only(bundle.test, evaluation_ks), method="hipporag2", stage="test")
         graph_online = graph_retriever.delta(before)
         maybe_reader("hipporag2", graph_metrics)
+        graph = model.materialize_full_graph()
+        graph_metrics = _attach_multistep(
+            graph_metrics, method="hipporag2",
+            search_trace=_trace_search(lambda query, k, trace, graph=graph: fuse_and_rerank(
+                query, [model.graph_retriever.search(query, graph, model.config.candidate_k)],
+                model.reranker, k=k, candidate_k=model.config.candidate_k,
+                source="hipporag2_reranked", trace=trace,
+            )),
+            model=model, queries=bundle.test, log_dir=multistep_dir, documents=bundle.documents,
+        )
         full_cost = model.full_graph.cost
         baseline_trials.extend([
             {"design_seed": design_seed, "fold": fold, "method": "hipporag2", "online_retrieval_cost": graph_online,
@@ -471,22 +607,25 @@ def _run_fold_experiment(config: dict[str, Any], bundle: Any, fold: int) -> dict
                 first_run["input_tokens"] + first_run["output_tokens"] + first_run["embedding_tokens"]
             ) / denominator_tokens
             row["actual_usd_fraction"] = deployed["estimated_usd"] / denominator_usd if denominator_usd > 0 else None
+            attach_token_efficiency(row)
         rows.extend(seed_rows)
+        for trial in baseline_trials:
+            attach_token_efficiency(trial)
 
-        # Reader-only methods/budgets still retrieve exactly once, and save the
+        # Reader-only methods still retrieve exactly once, and save the
         # corresponding evidence before QA instead of invoking a second search.
         for method in sorted(reader_methods - reader_done):
             if method in REGIONAL_METHODS:
-                selected = model.select(reader_budget, method)
+                selected = model.select(method)
                 metrics = _audited(lambda: model.evaluate(bundle.test, selected, evaluation_ks),
-                                   method=method, budget_fraction=reader_budget, stage="reader_retrieval")
+                                   method=method, selection="full_pipeline", stage="reader_retrieval")
             elif method in GLOBAL_METHODS:
-                baseline = factory.build(method, reader_budget * model.full_graph_cost)
+                baseline = factory.build(method)
                 metrics = _audited(lambda: model.evaluate_search(bundle.test, lambda text, depth, trace: baseline.search(text, depth), evaluation_ks),
-                                   method=method, budget_fraction=reader_budget, stage="reader_retrieval")
+                                   method=method, selection="full_pipeline", stage="reader_retrieval")
             else:
                 raise ValueError(f"Unknown reader method: {method}")
-            maybe_reader(method, metrics, reader_budget)
+            maybe_reader(method, metrics)
 
     design_reports[-1]["conditional_selection"] = model.selection_reports
 
@@ -499,29 +638,34 @@ def _run_fold_experiment(config: dict[str, Any], bundle: Any, fold: int) -> dict
     ablation_config = experiment["partition_ablations"]
     if not isinstance(ablation_config, dict):
         raise ValueError("experiment.partition_ablations is required")
+    if "budget" in ablation_config:
+        print(json.dumps({
+            "warning": "partition_ablations.budget is ignored; WARP runs its full pipeline",
+        }, ensure_ascii=False), flush=True)
     ablation_seed = int(ablation_config["seed"])
-    ablation_budget = float(ablation_config["budget"])
     for mode in [str(value) for value in ablation_config["modes"]]:
         model, graph_retriever = _build_model(config, bundle, ablation_seed, mode)
-        selected = model.select(ablation_budget, "warp")
+        selected = model.select("warp")
         before = graph_retriever.stats()
         metrics = model.evaluate(bundle.test, selected)
-        ablation_design_cost, ablation_extra_cost = _probe_design_costs(model, "warp", selected, config["graph"], ablation_budget)
-        partition_ablation_rows.append({
+        ablation_design_cost, ablation_extra_cost = _probe_design_costs(model, "warp", selected, config["graph"])
+        ablation = {
             "design_search_cost": ablation_design_cost.to_dict(),
             "incremental_design_cost": ablation_extra_cost.to_dict(),
-            "conditional_design": model.selection_reports.get(str(float(ablation_budget)), {}),
+            "conditional_design": model.selection_reports.get("full_pipeline", {}),
             "partition_mode": mode,
             "design_seed": ablation_seed,
             "fold": fold,
-            "budget_fraction": ablation_budget,
+            "selection": "full_pipeline",
             "selected_regions": selected,
             "deployment_cost": aggregate_costs([model.graphs[key].cost for key in selected]).to_dict(),
             "online_retrieval_cost": graph_retriever.delta(before),
             "routing": model.routing_diagnostics(bundle.test),
             "num_regions": len(model.regions),
             **metrics,
-        })
+        }
+        attach_token_efficiency(ablation)
+        partition_ablation_rows.append(ablation)
         model = graph_retriever = None
         gc.collect()
         if torch.cuda.is_available():
@@ -536,7 +680,11 @@ def _run_fold_experiment(config: dict[str, Any], bundle: Any, fold: int) -> dict
     }
 
 
-def run_experiment(config: dict[str, Any], checkpoint_dir: Path | None = None) -> dict[str, Any]:
+def run_experiment(
+    config: dict[str, Any],
+    checkpoint_dir: Path | None = None,
+    max_folds: int | None = None,
+) -> dict[str, Any]:
     """Run deterministic cross-fitting and merge all held-out query results."""
     if checkpoint_dir is None:
         checkpoint_dir = Path(config["graph"]["artifact_root"]) / "experiment_records"
@@ -547,6 +695,10 @@ def run_experiment(config: dict[str, Any], checkpoint_dir: Path | None = None) -
     seed = int(experiment["seed"])
     metadata = reproducibility_metadata(config)
     bundles = load_crossfit_bundles(config["dataset"], folds, seed)
+    if max_folds is not None:
+        if int(max_folds) < 1:
+            raise ValueError("max_folds must be a positive integer")
+        bundles = bundles[: int(max_folds)]
     source_hash = hashlib.sha256()
     for source in sorted(Path(__file__).parent.rglob("*.py")):
         source_hash.update(str(source.relative_to(Path(__file__).parent)).encode())
@@ -593,7 +745,7 @@ def run_experiment(config: dict[str, Any], checkpoint_dir: Path | None = None) -
             audit_path = checkpoint_dir / "raw" / f"fold-{fold}-{uuid4().hex}.jsonl" if checkpoint_dir else None
             with audit_scope(path=str(audit_path) if audit_path else None, fold=fold,
                              signature=signature, stage="experiment"):
-                result = _run_fold_experiment(config, bundle, fold)
+                result = _run_fold_experiment(config, bundle, fold, checkpoint_dir=checkpoint_dir)
             result["raw_audit_path"] = str(audit_path) if audit_path else None
             if checkpoint is not None:
                 write_json(checkpoint, {"signature": signature, "fold": fold, "result": result})
@@ -612,6 +764,9 @@ def run_experiment(config: dict[str, Any], checkpoint_dir: Path | None = None) -
         raise ValueError("Cross-fitting must evaluate each query exactly once")
     metadata["cross_fitting"] = {
         "folds": folds,
+        "executed_folds": len(bundles),
+        "max_folds": None if max_folds is None else int(max_folds),
+        "executed_fold_indices": list(range(len(bundles))),
         "design_queries_per_fold": [len(bundle.train) for bundle in bundles],
         "test_queries_per_fold": [len(bundle.test) for bundle in bundles],
         "total_unique_held_out_queries": len(held_out_ids),
@@ -626,18 +781,16 @@ def run_experiment(config: dict[str, Any], checkpoint_dir: Path | None = None) -
         "baselines": _crossfit_summary(baseline_trials, ("method",), seed),
         "quality_cost_curve": quality_rows,
         "quality_cost_summary": _crossfit_summary(
-            quality_rows, ("method", "budget_fraction"), seed,
+            quality_rows, ("method",), seed,
         ),
         "quality_cost_auc": _quality_cost_auc(quality_rows),
         "paired_significance": _significance(
-            quality_rows + [{**row, "budget_fraction": budget}
-                            for row in baseline_trials
-                            for budget in sorted({trial["budget_fraction"] for trial in quality_rows})],
+            quality_rows + baseline_trials,
             int(experiment["randomization_samples"]), seed,
         ),
         "partition_ablations": partition_rows,
         "partition_ablation_summary": _crossfit_summary(
-            partition_rows, ("partition_mode", "budget_fraction"), seed,
+            partition_rows, ("partition_mode",), seed,
         ),
         "reader_evaluation_trials": reader_trials,
         "reader_evaluation": _reader_summary(reader_trials) if reader_trials else [],
@@ -649,13 +802,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", required=True, help="YAML experiment configuration")
     parser.add_argument("--output", default="outputs/results.json", help="Result JSON path")
     parser.add_argument("--checkpoint-dir", type=Path, help="Resume completed folds; default: <output>.folds")
+    parser.add_argument("--max-folds", type=int, default=None,
+                        help="Run only the first N cross-fitting folds; the yaml fold split is unchanged")
+    parser.add_argument("--skip-multistep", action="store_true",
+                        help="Disable the IRCoT对照; QA still uses the first-pass retrieval cache")
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
     checkpoint_dir = args.checkpoint_dir or Path(args.output + ".folds")
-    result = run_experiment(load_config(args.config), checkpoint_dir)
+    config = _apply_run_overrides(load_config(args.config), skip_multistep=args.skip_multistep)
+    result = run_experiment(config, checkpoint_dir, max_folds=args.max_folds)
     write_json(args.output, result)
     print(json.dumps({"output": args.output, "rows": len(result["quality_cost_curve"])}, ensure_ascii=False))
 
