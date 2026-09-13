@@ -66,7 +66,7 @@ def evaluate_hipporag2_reader(
     em_total = f1_total = 0.0
     predictions: list[dict[str, Any]] = []
     # 多答案问题取所有规范答案中的最佳 EM/F1，这是 QA benchmark 的常规口径。
-    for query, solution in zip(eligible, answered):
+    for query, solution, original in zip(eligible, answered, solutions):
         if solution.question != query.text:
             raise RuntimeError("Reader returned answers in a different query order")
         golds = query.answer if isinstance(query.answer, list) else [query.answer]
@@ -74,8 +74,15 @@ def evaluate_hipporag2_reader(
         f1 = max(answer_f1(solution.answer, gold) for gold in golds)
         em_total += em
         f1_total += f1
-        predictions.append({"query_id": query.id, "prediction": solution.answer, "gold_answers": golds,
-                            "answer_em": em, "answer_f1": f1})
+        retrieved = [item.get("warp_doc_id") for item in (original.doc_metadata or []) if item.get("warp_doc_id")]
+        predictions.append({
+            "query_id": query.id,
+            "query": query.text,
+            "retrieved_doc_ids": retrieved,
+            "prediction": solution.answer,
+            "gold_answers": golds,
+            "answer_em": em, "answer_f1": f1,
+        })
     after = tracker.get("reader")
     usage = {key: after.get(key, 0) - before.get(key, 0) for key in set(after) | set(before)}
     return {

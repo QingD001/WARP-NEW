@@ -51,6 +51,17 @@ class ConditionalAndMultistepTests(unittest.TestCase):
         self.assertEqual(len(calls), 4)
         self.assertTrue(all("r2" not in call for call in calls))
 
+    def test_conditional_shortlist_ranks_by_frequency_times_gain_not_cost(self):
+        model, _ = self.pair_model()
+        model.estimated_gains = {"r0": 0.1, "r1": 0.1}
+        model.costs = {"r0": 100.0, "r1": 1.0, "r2": 1.0}
+        model.features["r0"].query_freq = 10
+        model.features["r1"].query_freq = 1
+        _, report = select_conditional(model)
+        self.assertEqual(report["candidate_regions"][0], "r0")
+        first = report["rounds"][0]["candidates"][0]
+        self.assertEqual(first["score"], first["gain"])
+
     def test_conditional_controls_match_actual_warp_count_not_independent_score(self):
         model, _ = self.pair_model()
         warp = model.select("warp")

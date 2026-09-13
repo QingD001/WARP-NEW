@@ -12,7 +12,7 @@ def select_conditional(model, budget=None):
     if len(queries) > cfg.conditional_max_queries:
         queries = sorted(random.Random(cfg.seed).sample(queries, cfg.conditional_max_queries), key=lambda q: q.id)
     ranked = sorted(model.probes, key=lambda key: (
-        -model.features[key].query_freq * max(model.estimated_gains[key], 0) / model.costs[key], key))
+        -model.features[key].query_freq * max(model.estimated_gains[key], 0), key))
     if budget is not None:
         ranked = [region_id for region_id in ranked if model.costs[region_id] <= budget + 1e-9]
     candidates = ranked[:cfg.conditional_candidates]
@@ -52,7 +52,7 @@ def select_conditional(model, budget=None):
             rows = measure(proposed)
             deltas = [row["utility"] - old["utility"] for row, old in zip(rows, base)]
             gain = sum(deltas) / (len(deltas) + cfg.gain_prior_queries)
-            scored.append({"addition": list(addition), "gain": gain, "score": gain / cost,
+            scored.append({"addition": list(addition), "gain": gain, "score": gain, "cost": cost,
                            "per_query_delta": dict(zip([q.id for q in queries], deltas))})
         best = max(scored, key=lambda row: row["score"], default=None)
         record = {"selected_before": sorted(selected), "candidates": scored,

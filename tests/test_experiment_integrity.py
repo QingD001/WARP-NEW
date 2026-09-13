@@ -180,6 +180,13 @@ class IntegrityTests(unittest.TestCase):
                 self.assertTrue(all(row.get("multistep", {}).get("protocol") == "ircot"
                                     for row in output["quality_cost_curve"]))
                 self.assertTrue((root / "checkpoints" / "multistep" / "fold-0" / "warp.jsonl").exists())
+                self.assertTrue((root / "checkpoints" / "retrieval" / "fold-0" / "warp.jsonl").exists())
+                self.assertTrue((root / "checkpoints" / "reader" / "fold-0" / "warp-repeat-0.jsonl").exists())
+                self.assertTrue((root / "checkpoints" / "reader" / "fold-0" / "warp-repeat-2.jsonl").exists())
+                self.assertEqual(
+                    {row["reader_repeats"] for row in output["reader_evaluation"]},
+                    {int(config["reader"]["repeats"])},
+                )
                 self.assertEqual(len(output["partition_ablations"]), 6)
                 self.assertTrue(all(row["num_queries"] == 4 for row in output["baselines"]))
                 self.assertIn("hybrid", {row["reference"] for row in output["paired_significance"]})

@@ -512,6 +512,10 @@ class WARPG:
         gini = (sum((2 * index - len(nonnegative) - 1) * value
                     for index, value in enumerate(nonnegative, 1))
                 / (len(nonnegative) * total)) if total > 0 else 0.0
+
+        def _pp(value: float | None) -> float | None:
+            return None if value is None else float(value) * 100.0
+
         return {
             "config": asdict(self.config),
             "num_documents": len(self.bundle.documents) if self.bundle else 0,
@@ -527,6 +531,10 @@ class WARPG:
                 "median": statistics.median(observed) if observed else None,
                 "maximum": observed[-1] if observed else None,
                 "mean": sum(observed) / len(observed) if observed else None,
+                "minimum_pp": _pp(observed[0] if observed else None),
+                "median_pp": _pp(statistics.median(observed) if observed else None),
+                "maximum_pp": _pp(observed[-1] if observed else None),
+                "mean_pp": _pp(sum(observed) / len(observed) if observed else None),
                 "positive_fraction": sum(value > 0 for value in observed) / len(observed) if observed else None,
                 "nonnegative_gain_gini": gini,
             },
@@ -544,10 +552,14 @@ class WARPG:
                 "doc_ids": region.doc_ids,
                 "estimated_cost": self.costs[region.id],
                 "estimated_gain": self.estimated_gains.get(region.id) if region.id in self.probes else None,
+                "estimated_gain_pp": _pp(self.estimated_gains.get(region.id) if region.id in self.probes else None),
                 "gain_status": "measured" if region.id in self.probes else "unprobed",
                 "probe_gain": self.probes[region.id].gain if region.id in self.probes else None,
+                "probe_gain_pp": _pp(self.probes[region.id].gain if region.id in self.probes else None),
                 "probe_recall_gain": self.probes[region.id].recall_gain if region.id in self.probes else None,
+                "probe_recall_gain_pp": _pp(self.probes[region.id].recall_gain if region.id in self.probes else None),
                 "probe_complete_gain": self.probes[region.id].complete_gain if region.id in self.probes else None,
+                "probe_complete_gain_pp": _pp(self.probes[region.id].complete_gain if region.id in self.probes else None),
                 "probe_query_count": self.probes[region.id].query_count if region.id in self.probes else None,
                 "probe_eligible_query_count": self.probes[region.id].eligible_query_count if region.id in self.probes else None,
                 "probe_per_query": self.probes[region.id].per_query if region.id in self.probes else None,

@@ -75,7 +75,10 @@ class LocalFeatureTests(unittest.TestCase):
         report = model.report()
         self.assertEqual(report["probe_regions"], [])
         self.assertIsNone(report["observed_gain_distribution"]["mean"])
+        self.assertIsNone(report["observed_gain_distribution"]["mean_pp"])
         self.assertTrue(all(r["gain_status"] == "unprobed" for r in report["regions"]))
+        self.assertTrue(all(r["estimated_gain_pp"] is None and r["probe_gain_pp"] is None
+                            for r in report["regions"]))
 
     def test_raw_llm_record_preserves_content_not_credentials(self):
         with tempfile.TemporaryDirectory() as directory:

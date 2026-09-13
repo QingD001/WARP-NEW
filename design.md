@@ -102,7 +102,9 @@ score_i = query_freq_i × max(estimated_gain_i, 0)
 ```
 
 区域不可拆分。独立模式选出全部 `score_i>0` 的区域后停止；条件模式按实测边际 gain>0 停止。
+条件选区的候选短名单同样按 `query_freq × max(estimated_gain, 0)` 排序，边际比较用原始 gain，不再除 cost。
 两者都不再用 token proxy 做探测或部署截断。对照只换 frequency / gain / random 排序公式，并取与 WARP 相同的区域个数。
+选区公式不乘常数、不另加 ε 门槛；表中增益另报百分点（`*_pp = gain × 100`），方便阅读。
 
 正式比较方法：
 
@@ -152,6 +154,9 @@ Retrieval 指标：Evidence Recall 与 Complete Evidence 统一报告 **@2 / @3 
 主路径检索与 Reader 使用第一遍结果；IRCoT 多步是另开的对照，不覆盖问答缓存。
 Reader 固定为同一 HippoRAG2 QA LLM
 （正式配置为 `deepseek-v4-flash`），报告 Answer EM/F1；Reader 复用该方法那一轮检索的文档，不另设预算档。
+正式配置 `reader.repeats=3`，同一检索缓存连跑三次并报告 mean/std；温度 0 且命中 QA 缓存时三次可以完全相同。
+每折检索列表写到 `<checkpoint>/retrieval/fold-<k>/<method>.jsonl`，每次 Reader 回答写到
+`<checkpoint>/reader/fold-<k>/<method>-repeat-<i>.jsonl`，便于举题级例子。
 
 每个方法只跑一轮完整 pipeline。全部正式实验固定 `seed=42`。
 每个方法通过 query-level paired bootstrap 报告 95% CI。WARP 与所有参考方法做 paired

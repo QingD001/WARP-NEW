@@ -374,9 +374,82 @@ def _reader_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         trials = [row for row in rows if row["method"] == summary["method"]]
         count = sum(row["num_queries"] for row in trials)
         summary["num_queries"] = count
+        summary["reader_repeats"] = len({row.get("reader_repeat", 0) for row in trials})
         for metric in ("answer_em", "answer_f1"):
             summary[f"{metric}_mean"] = sum(row[metric] * row["num_queries"] for row in trials) / count
     return output
+
+
+def _gold_answers(query: Any) -> list[str]:
+    if query is None or query.answer is None:
+        return []
+    return list(query.answer) if isinstance(query.answer, list) else [query.answer]
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _persist_retrieval_jsonl(
+    checkpoint_dir: Path | None, fold: int, method: str, metrics: dict[str, Any], queries: list[Any],
+) -> None:
+    if checkpoint_dir is None:
+        return
+    query_map = {query.id: query for query in queries}
+    rows = []
+    for query_id, doc_ids in (metrics.get("retrieved_doc_ids") or {}).items():
+        query = query_map.get(query_id)
+        row = {
+            "method": method,
+            "fold": fold,
+            "query_id": query_id,
+            "query": query.text if query is not None else None,
+            "gold_doc_ids": list(query.gold_doc_ids) if query is not None else [],
+            "gold_answers": _gold_answers(query),
+            "retrieved_doc_ids": list(doc_ids),
+        }
+        row.update(metrics.get("per_query", {}).get(query_id, {}))
+        rows.append(row)
+    _write_jsonl(Path(checkpoint_dir) / "retrieval" / f"fold-{fold}" / f"{method}.jsonl", rows)
+
+
+def _persist_reader_jsonl(
+    checkpoint_dir: Path | None, fold: int, method: str, repeat: int,
+    scored: dict[str, Any], metrics: dict[str, Any], queries: list[Any],
+) -> None:
+    if checkpoint_dir is None:
+        return
+    query_map = {query.id: query for query in queries}
+    predictions = list(scored.get("predictions") or [])
+    if not predictions:
+        predictions = [{
+            "query_id": query.id,
+            "query": query.text,
+            "retrieved_doc_ids": list((metrics.get("retrieved_doc_ids") or {}).get(query.id, [])),
+            "prediction": None,
+            "gold_answers": _gold_answers(query),
+        } for query in queries if query.answer is not None]
+    rows = []
+    for item in predictions:
+        query = query_map.get(item.get("query_id"))
+        row = {
+            "method": method,
+            "fold": fold,
+            "reader_repeat": repeat,
+            "query": item.get("query") if item.get("query") is not None else (query.text if query is not None else None),
+            "retrieved_doc_ids": item.get("retrieved_doc_ids") or list(
+                (metrics.get("retrieved_doc_ids") or {}).get(item.get("query_id"), [])
+            ),
+            **{key: value for key, value in item.items() if key not in {"query", "retrieved_doc_ids"}},
+        }
+        rows.append(row)
+    _write_jsonl(
+        Path(checkpoint_dir) / "reader" / f"fold-{fold}" / f"{method}-repeat-{repeat}.jsonl",
+        rows,
+    )
 
 
 def _run_fold_experiment(
@@ -432,28 +505,44 @@ def _run_fold_experiment(
         reader_config = config["reader"]
         reader_methods = {str(value).lower() for value in reader_config["methods"]} if reader_config["enabled"] else set()
         reader_k = int(reader_config["top_k"])
+        reader_repeats = int(reader_config.get("repeats", 1))
+        if reader_repeats < 1:
+            raise ValueError("reader.repeats must be a positive integer")
         evaluation_ks = tuple(sorted(set(model.config.retrieval_ks) | ({reader_k} if reader_methods else set())))
         reader_done = set()
         pending_readers = {}
+        persisted_retrieval = set()
         multistep_dir = (
             Path(checkpoint_dir) / "multistep" / f"fold-{fold}"
             if checkpoint_dir is not None else None
         )
 
+        def persist_retrieval(method, metrics):
+            if method in persisted_retrieval:
+                return
+            _persist_retrieval_jsonl(checkpoint_dir, fold, method, metrics, bundle.test)
+            persisted_retrieval.add(method)
+
         def maybe_reader(method, metrics):
+            persist_retrieval(method, metrics)
             if method not in reader_methods or method in reader_done:
                 return
             reader_backend = next(iter(model.graphs.values()), None) or model.full_graph
             if reader_backend is None:
                 pending_readers[method] = metrics
                 return
-            with audit_scope(method=method, selection="full_pipeline", stage="reader"):
-                # QA only needs the shared LLM/config, not a corpus-wide graph.
-                scored = evaluate_hipporag2_reader(bundle.test, None, bundle.documents, reader_backend, reader_k,
-                                                   retrieved_doc_ids=metrics["retrieved_doc_ids"])
-                reader_trials.append({"design_seed": design_seed, "fold": fold, "method": method,
-                                      "selection": "full_pipeline", **scored})
-                emit("reader_result", reader_trials[-1])
+            for repeat in range(reader_repeats):
+                with audit_scope(method=method, selection="full_pipeline", stage="reader",
+                                 reader_repeat=repeat):
+                    # QA only needs the shared LLM/config, not a corpus-wide graph.
+                    scored = evaluate_hipporag2_reader(bundle.test, None, bundle.documents, reader_backend, reader_k,
+                                                       retrieved_doc_ids=metrics["retrieved_doc_ids"])
+                    reader_trials.append({"design_seed": design_seed, "fold": fold, "method": method,
+                                          "selection": "full_pipeline", "reader_repeat": repeat, **scored})
+                    emit("reader_result", reader_trials[-1])
+                    _persist_reader_jsonl(
+                        checkpoint_dir, fold, method, repeat, scored, metrics, bundle.test,
+                    )
             reader_done.add(method)
 
         for method in ("bm25", "dense", "hybrid"):

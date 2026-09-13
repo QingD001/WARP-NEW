@@ -86,7 +86,7 @@ S* = argmax_{S ⊆ R} E_{q ~ Q_future}[M(q; H, G_S)]
 独立边际收益 `g_i`，再计算：
 
 ```text
-score_i = query_frequency_i × max(measured_gain_i, 0) / estimated_graph_cost_i.
+score_i = query_frequency_i × max(measured_gain_i, 0)
 ```
 
 独立模式选出全部 `score_i>0` 的区域后停止；条件模式在探测区内测量边际增益，增益非正时停止。这是可部署 heuristic，不是一般非加性集合效用问题的最优算法。paper 默认不跑二阶交互主表（`interaction_pairs=0`）。

@@ -198,19 +198,18 @@ CrossEncoder 路径测量每个 region 相对 Base 的真实增益。
 直接使用成对检索的实测净增益，以 `n / (n + gain_prior_queries)` 向零收缩。
 未探测区域不外推，报告标记为 `unprobed`；独立选区与 Gain-only 只选择单区已测正收益区域。
 默认 WARP 使用条件选区，允许单区零收益但联合有收益的区域组合。
-默认探测建图预算为全图估算成本的 10%，每区最多 64 个设计问题，不再要求至少六区。
-这是成本 proxy 约束，不是实际 API tokens 硬限额。
+探测按 `probe_fraction` 抽样实测，每区最多 64 个设计问题，不再用构图 token proxy 卡探测。
 
 #### `warp/advisor/selector.py`
 
 独立选区模式在相同 regions 上只替换排序公式。WARP 按
 
 ```text
-query_frequency × max(estimated_gain, 0) / estimated_graph_cost
+query_frequency × max(estimated_gain, 0)
 ```
 
-选出 `score>0` 的区域后自然结束，不再用 token proxy 做背包截断。Random-region、Frequency-only、Gain-only 和
-Cost-only 取与 WARP 相同的区域个数，提供频率、收益与成本规则的完整流程对照。
+选出 `score>0` 的区域后自然结束，不再用 token proxy 做背包截断。Random-region、Frequency-only 与 Gain-only
+取与 WARP 相同的区域个数，分别对照随机、频率与收益规则。
 
 #### `warp/advisor/conditional.py` 与 `warp/retrieval/multistep.py`
 
