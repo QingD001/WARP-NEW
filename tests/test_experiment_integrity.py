@@ -174,7 +174,7 @@ class IntegrityTests(unittest.TestCase):
                  patch.object(run, "GlobalBaselineFactory", Factory), \
                  patch.object(run, "evaluate_hipporag2_reader", side_effect=reader):
                 output = run.run_experiment(config, root / "checkpoints")
-                self.assertEqual(len(output["quality_cost_curve"]), 14)
+                self.assertEqual(len(output["quality_cost_curve"]), 12)
                 self.assertTrue(all("evidence_recall@2" in row and "complete_evidence@3" in row
                                     for row in output["quality_cost_curve"]))
                 self.assertTrue(all(row.get("multistep", {}).get("protocol") == "ircot"

@@ -47,7 +47,6 @@ class WARPConfig:
     semantic_lambda: float = 0.05
     probe_fraction: float = 0.2
     probe_max_queries: int | None = 64
-    probe_budget_fraction: float | None = 0.1
     gain_prior_queries: float = 16.0
     benefit_objective: str = "mixed"
     complete_weight: float = 0.5
@@ -85,8 +84,6 @@ class WARPConfig:
             raise ValueError("dispersion_pairs, interaction_pairs and min_region_size must be positive")
         if self.partition_mode not in {"combined", "query", "semantic", "random"}:
             raise ValueError("partition_mode must be combined, query, semantic, or random")
-        if self.probe_budget_fraction is not None and not 0 < self.probe_budget_fraction <= 1:
-            raise ValueError("probe_budget_fraction must be in (0, 1]")
         self.retrieval_ks = tuple(int(k) for k in self.retrieval_ks)
         if not self.retrieval_ks or any(k <= 0 for k in self.retrieval_ks):
             raise ValueError("retrieval_ks must be a non-empty sequence of positive cutoffs")
@@ -229,10 +226,7 @@ class WARPG:
             complete_weight=self.config.complete_weight,
             search_fn=self._probe_search,
         )
-        probe_regions = prober.select_probe_regions(
-            self.regions, self.features, costs=self.costs,
-            budget=(self.config.probe_budget_fraction * self.full_graph_cost
-                    if self.config.probe_budget_fraction is not None else None))
+        probe_regions = prober.select_probe_regions(self.regions, self.features)
         before_design_retrieval = self.graph_retriever.stats()
         self.probes = prober.run(probe_regions, bundle.documents, bundle.train,
                                  self.region_queries, base_results)

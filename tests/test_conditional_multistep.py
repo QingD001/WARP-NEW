@@ -57,7 +57,7 @@ class ConditionalAndMultistepTests(unittest.TestCase):
         self.assertEqual(warp, ["r0", "r1"])
         independent = model.selector.select("warp", model.features, model.costs, model.estimated_gains)
         self.assertEqual(independent, [])
-        for method in ("random_region", "frequency_only", "gain_only", "cost_only"):
+        for method in ("random_region", "frequency_only", "gain_only"):
             self.assertEqual(len(model.select(method)), len(warp))
 
     def test_evaluation_cap_and_negative_marginals(self):
@@ -140,7 +140,7 @@ class ConditionalAndMultistepTests(unittest.TestCase):
     def test_fit_probes_actual_multistep_path_and_records_mixed_labels(self):
         model = model_fixture()
         model.config = replace(model.config, retrieval_steps=2, selection_mode="conditional",
-                               probe_fraction=1, probe_budget_fraction=1)
+                               probe_fraction=1)
         regions = model.regions[:2]
         features = {r.id: model.features[r.id] for r in regions}
         graphs = dict(model.graphs)

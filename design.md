@@ -14,7 +14,7 @@ BM25、NV-Embed-v2 和 CrossEncoder。昂贵的 HippoRAG2 图是附加物理结�
 
 - RQ1：HippoRAG2 相对 Base 的收益是否在 corpus regions 之间显著不均匀？
 - RQ2：仅使用探测区实测收益（不对未探测区域外推）时，条件边际选区是否优于独立 score 排序与个数对齐对照？
-- RQ3：在各自完整 pipeline 下，WARP-G 是否优于个数对齐的四个 region-selection controls、原生 core
+- RQ3：在各自完整 pipeline 下，WARP-G 是否优于个数对齐的 region-selection controls（random / frequency / gain）、原生 core
   比例的 KET-RAG/G2ConS，并以更低实际构图 tokens 接近 Full Graph？
 - RQ4：收益排序对 partition method 的变化是否稳定，query routing 对系统上限有多大影响？
 - RQ5：construction savings 是否会被策略搜索成本或在线区域图调用抵消？
@@ -98,17 +98,17 @@ U = (1 - complete_weight) * EvidenceRecall + complete_weight * CompleteEvidence
 独立模式 WARP score：
 
 ```text
-score_i = query_freq_i × max(estimated_gain_i, 0) / estimated_graph_cost_i
+score_i = query_freq_i × max(estimated_gain_i, 0)
 ```
 
 区域不可拆分。独立模式选出全部 `score_i>0` 的区域后停止；条件模式按实测边际 gain>0 停止。
-两者都不再用 token proxy 做部署截断。四个 control 只换排序公式，并取与 WARP 相同的区域个数。
+两者都不再用 token proxy 做探测或部署截断。对照只换 frequency / gain / random 排序公式，并取与 WARP 相同的区域个数。
 
 正式比较方法：
 
 - BM25、Dense 与 Hybrid；
-- Random-region、Frequency-only、Gain-only 与 Cost-only：复用完全相同的 regions、成本估计和检索后端，
-  依次检验随机选择、workload frequency、预测收益和低成本偏好的单独作用；
+- Random-region、Frequency-only 与 Gain-only：复用完全相同的 regions 和检索后端，
+  依次检验随机选择、workload frequency 和预测收益的单独作用；
 - KET-RAG：lexical/semantic KNN PageRank core chunks、HippoRAG2 KG skeleton、全语料 keyword
   bipartite retrieval；
 - G2ConS：sentence-level concept embeddings、semantic-filtered co-occurrence concept graph、PageRank
@@ -120,7 +120,7 @@ KET-RAG 与 G2ConS 的昂贵 KG 都使用与 WARP 相同的 HippoRAG2 builder，
 它们按各自论文的文档比例选取 core（正式配置 `ket_core_fraction`/`g2_core_fraction`=0.8），不再套用
 WARP 的 token 预算；轻量 keyword/concept 结构始终计入 deployment cost。
 
-四个 region-selection controls 是 selector ablation，不是四套独立构图系统：它们复用同一折已经完成的 WARP
+region-selection controls 是 selector ablation，不是独立构图系统：它们复用同一折已经完成的 WARP
 physical-design state，只替换最后的区域排序公式，并对齐 WARP 的选区个数。LinearRAG 与 LightRAG 另用锁定的作者官方仓库，在相同完整
 corpus 和 1,000 queries 上运行独立 end-to-end 表；由于构图单元和成本维度不相同，不强行映射到本节实际 token 主表。
 完整方法差异、官方代码状态和 commit 见 `related_work.md` 与 `configs/official_baselines.yaml`。
@@ -144,7 +144,7 @@ Test query 先运行 Base，取 top-`routing_k` 文档并查表得到 regions。
 原始维度包括 LLM input/output tokens、embedding tokens、wall time、nodes、edges、storage 和按配置中
 固定价格快照计算的 USD。主报这些实测 tokens 以及 CE@10 / tokens 的 token efficiency。
 相对 Full Graph 的 `actual_cost_fraction` 只作描述，不是选择时的截断约束。
-探测阶段仍可用 `probe_budget_fraction` 限制试建区域的文本 proxy，与部署选择无关。
+探测按 `probe_fraction` 抽样实测，不再用构图 token proxy 做探测或部署截断；独立选区分数只使用 frequency × gain。
 
 ## 10. 评价与统计
 

@@ -42,7 +42,7 @@ TOKEN_EFFICIENCY_KEYS = (
     "total_tokens_excluding_design", "total_tokens_including_design",
     "token_efficiency_excluding_design", "token_efficiency_including_design",
 )
-REGIONAL_METHODS = {"warp", "random_region", "frequency_only", "gain_only", "cost_only"}
+REGIONAL_METHODS = {"warp", "random_region", "frequency_only", "gain_only"}
 GLOBAL_METHODS = {"ket_rag", "g2cons"}
 
 

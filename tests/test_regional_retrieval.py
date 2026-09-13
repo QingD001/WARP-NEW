@@ -63,12 +63,25 @@ def model_fixture():
 
 
 class RegionalRetrievalTests(unittest.TestCase):
+    def test_warp_ranks_by_frequency_times_gain_not_cost(self):
+        from warp.advisor.selector import RegionSelector
+        features = {
+            "cheap": RegionFeatures("cheap", 1, 1, 1, 0, 0, 0, 0, 0, 0),
+            "hot": RegionFeatures("hot", 1, 1, 10, 0, 0, 0, 0, 0, 0),
+        }
+        selector = RegionSelector(42)
+        ranked = selector.rank("warp", features, {"cheap": 1.0, "hot": 100.0},
+                               {"cheap": 0.1, "hot": 0.1})
+        self.assertEqual(ranked[0], "hot")
+        self.assertEqual(selector.select("warp", features, {"cheap": 1.0, "hot": 100.0},
+                                         {"cheap": 0.1, "hot": 0.1}), ["hot", "cheap"])
+
     def test_controls_reuse_warp_region_count(self):
         model = model_fixture()
         model.estimated_gains["r2"] = 0.0
         warp = model.select("warp")
         self.assertEqual(warp, ["r0", "r1"])
-        for method in ("random_region", "frequency_only", "gain_only", "cost_only"):
+        for method in ("random_region", "frequency_only", "gain_only"):
             self.assertEqual(len(model.select(method)), len(warp))
 
     def test_selector_and_evaluation_do_not_alias_methods(self):

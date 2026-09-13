@@ -10,18 +10,18 @@ from warp.models import RegionFeatures
 class RegionSelector:
     """只替换区域排序公式；WARP 按 score>0 自然结束，controls 取同样多的区域。
 
-    四个 control 复用同一折 regions / 成本估计 / 预测，不重新构图，也不再用
-    token 预算截断。
+    对照只保留 frequency / gain（以及随机打乱）；不再用构图成本排序或截断。
     """
 
-    METHODS = {"warp", "random_region", "frequency_only", "gain_only", "cost_only"}
+    METHODS = {"warp", "random_region", "frequency_only", "gain_only"}
 
     def __init__(self, seed: int) -> None:
         self.seed = seed
 
     def score(self, region_id: str, features: dict[str, RegionFeatures],
               costs: dict[str, float], estimated_gains: dict[str, float]) -> float:
-        return features[region_id].query_freq * max(estimated_gains[region_id], 0.0) / costs[region_id]
+        del costs
+        return features[region_id].query_freq * max(estimated_gains[region_id], 0.0)
 
     def rank(
         self, method: str, features: dict[str, RegionFeatures], costs: dict[str, float],
@@ -43,11 +43,9 @@ class RegionSelector:
             return sorted(ids, key=lambda key: (-features[key].query_freq, key))
         if method == "gain_only":
             return sorted(ids, key=lambda key: (-estimated_gains[key], key))
-        if method == "cost_only":
-            return sorted(ids, key=lambda key: (costs[key], key))
         return sorted(
             ids,
-            key=lambda key: (-self.score(key, features, costs, estimated_gains), costs[key], key),
+            key=lambda key: (-self.score(key, features, costs, estimated_gains), key),
         )
 
     def select(

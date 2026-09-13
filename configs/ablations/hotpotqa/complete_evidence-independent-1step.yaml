@@ -11,7 +11,6 @@ warp:
   semantic_lambda: 0.05
   probe_fraction: 0.2
   probe_max_queries: 64
-  probe_budget_fraction: 0.1
   gain_prior_queries: 16.0
   benefit_objective: complete_evidence
   complete_weight: 0.5
@@ -59,7 +58,6 @@ experiment:
   - random_region
   - frequency_only
   - gain_only
-  - cost_only
   - warp
   ket_core_fraction: 0.8
   g2_core_fraction: 0.8
