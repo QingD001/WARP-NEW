@@ -11,6 +11,7 @@ import hashlib
 import importlib.metadata
 import inspect
 import json
+import os
 import threading
 import time
 from dataclasses import asdict, dataclass, replace
@@ -26,6 +27,23 @@ from .builder import RegionalGraph
 UPSTREAM_REPOSITORY = "https://github.com/OSU-NLP-Group/HippoRAG"
 SUPPORTED_API_VERSION = "2.0.0a4"
 UPSTREAM_COMMIT = "c617143f01477243992a63b2e2151cc003dd3b21"
+_EMBEDDING_DTYPES = {"auto", "float16", "float32", "bfloat16"}
+
+
+def _embedding_batch_size(config: HippoRAG2Config) -> int:
+    raw = os.environ.get("WARP_EMBEDDING_BATCH_SIZE", "").strip()
+    value = int(raw) if raw else int(config.embedding_batch_size)
+    if value <= 0:
+        raise ValueError("embedding_batch_size must be positive")
+    return value
+
+
+def _embedding_model_dtype(config: HippoRAG2Config) -> str:
+    raw = os.environ.get("WARP_EMBEDDING_DTYPE", "").strip() or config.embedding_model_dtype
+    value = str(raw).lower()
+    if value not in _EMBEDDING_DTYPES:
+        raise ValueError(f"embedding_model_dtype must be one of {sorted(_EMBEDDING_DTYPES)}")
+    return value
 
 
 @dataclass(slots=True)
@@ -42,6 +60,7 @@ class HippoRAG2Config:
     azure_endpoint: str | None = None
     azure_embedding_endpoint: str | None = None
     embedding_batch_size: int = 8
+    embedding_model_dtype: str = "auto"
     retrieval_top_k: int = 200
     linking_top_k: int = 5
     qa_top_k: int = 5
@@ -248,7 +267,8 @@ class HippoRAG2GraphBuilder:
             embedding_base_url=self.config.embedding_base_url,
             azure_endpoint=self.config.azure_endpoint,
             azure_embedding_endpoint=self.config.azure_embedding_endpoint,
-            embedding_batch_size=self.config.embedding_batch_size,
+            embedding_batch_size=_embedding_batch_size(self.config),
+            embedding_model_dtype=_embedding_model_dtype(self.config),
             retrieval_top_k=self.config.retrieval_top_k,
             linking_top_k=self.config.linking_top_k, qa_top_k=self.config.qa_top_k,
             damping=self.config.damping, passage_node_weight=self.config.passage_node_weight,
