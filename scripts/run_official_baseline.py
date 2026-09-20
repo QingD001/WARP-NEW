@@ -9,6 +9,7 @@ from collections import Counter
 from contextlib import contextmanager
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import string
@@ -86,6 +87,33 @@ def score_predictions(method: str, rows: list[dict[str, Any]]) -> dict[str, Any]
     }
 
 
+def configure_linearrag_llm(settings: dict[str, Any], llm_model_cls: Any) -> Any:
+    """Align LinearRAG's OpenAI-compatible client with the WARP paper LLM, without a token cap."""
+    import httpx
+    from openai import OpenAI
+
+    if settings.get("llm_base_url"):
+        os.environ["OPENAI_BASE_URL"] = str(settings["llm_base_url"])
+    llm = llm_model_cls(settings["llm_model"])
+    max_tokens = settings.get("max_tokens")
+    if max_tokens is None:
+        llm.llm_config.pop("max_tokens", None)
+    else:
+        llm.llm_config["max_tokens"] = int(max_tokens)
+    if settings.get("disable_llm_thinking"):
+        extra = dict(llm.llm_config.get("extra_body") or {})
+        extra.setdefault("thinking", {"type": "disabled"})
+        extra.setdefault("enable_thinking", False)
+        llm.llm_config["extra_body"] = extra
+    timeout = float(settings.get("llm_timeout_seconds", 300.0))
+    llm.openai_client = OpenAI(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        base_url=os.getenv("OPENAI_BASE_URL"),
+        http_client=httpx.Client(timeout=timeout, trust_env=False),
+    )
+    return llm
+
+
 def run_linearrag(
     repo: Path, settings: dict[str, Any], documents: list[Any], queries: list[Any], index_dir: Path,
 ) -> tuple[list[dict[str, Any]], float, float]:
@@ -101,7 +129,7 @@ def run_linearrag(
             embedding_model=embedding,
             spacy_model=settings["spacy_model"],
             working_dir=str(index_dir.parent),
-            llm_model=LLM_Model(settings["llm_model"]),
+            llm_model=configure_linearrag_llm(settings, LLM_Model),
             max_workers=int(settings["max_workers"]),
             retrieval_top_k=int(settings["retrieval_top_k"]),
         )
