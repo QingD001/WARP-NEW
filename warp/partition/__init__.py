@@ -1,4 +1,4 @@
-"""共访问图构建与 Region 社区划分的公开接口。"""
+"""Public API for co-access graphs and region partition."""
 
 from .coaccess_graph import CoaccessGraph, CoaccessGraphBuilder
 from .leiden import RegionPartitioner

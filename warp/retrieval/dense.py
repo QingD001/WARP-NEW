@@ -1,4 +1,4 @@
-"""使用正式外部 encoder 的精确 Dense retrieval。"""
+"""Exact dense retrieval with an explicit external encoder."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from warp.utils import cosine
 
 
 class DenseRetriever:
-    """精确向量检索器；文档与查询编码由同一正式模型提供。"""
+    """Exact vector retriever; documents and queries share one encoder."""
 
     def __init__(self, encoder: Any, model_name: str) -> None:
         if encoder is None:
@@ -21,7 +21,7 @@ class DenseRetriever:
         self._index: dict[str, int] = {}
 
     def fit(self, documents: list[Document]) -> "DenseRetriever":
-        """一次性编码 corpus，并校验 encoder 输出与文档一一对应。"""
+        """Encode the corpus once and check one vector per document."""
         self.documents = list(documents)
         self.vectors = self.encoder.encode_documents([doc.content for doc in documents])
         if len(self.vectors) != len(self.documents):
@@ -32,18 +32,18 @@ class DenseRetriever:
         return self
 
     def encode(self, texts: list[str]) -> list[list[float]]:
-        """使用正式 query instruction 编码查询。"""
+        """Encode queries with the official query instruction."""
         values = self.encoder.encode_queries(texts)
         if len(values) != len(texts):
             raise RuntimeError(f"Dense encoder returned {len(values)} vectors for {len(texts)} queries")
         return values
 
     def vector(self, doc_id: str) -> list[float]:
-        """返回已缓存文档向量，供语义边和 dispersion 特征复用。"""
+        """Cached document vector for semantic edges and dispersion."""
         return self.vectors[self._index[doc_id]]
 
     def search(self, query: str, k: int = 10, doc_ids: set[str] | None = None) -> list[SearchResult]:
-        """执行精确余弦检索。"""
+        """Exact cosine retrieval."""
         if k <= 0:
             return []
         query_vector = self.encode([query])[0]

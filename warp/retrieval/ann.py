@@ -1,4 +1,4 @@
-"""基于 FAISS HNSW 的正式语义近邻索引。"""
+"""FAISS HNSW semantic nearest-neighbor index."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ def semantic_knn(
     ids: Sequence[str], vectors: Sequence[Sequence[float]], k: int, *, hnsw_m: int = 32,
     ef_construction: int = 200, ef_search: int = 128,
 ) -> dict[str, list[tuple[str, float]]]:
-    """返回每个 ID 的 cosine top-k 邻居，不构造二次规模相似度矩阵。"""
+    """Cosine top-k neighbors per ID without a quadratic similarity matrix."""
     if len(ids) != len(vectors) or not ids:
         raise ValueError("ANN index requires aligned non-empty IDs and vectors")
     if k < 0 or hnsw_m <= 0 or ef_construction <= 0 or ef_search <= 0:

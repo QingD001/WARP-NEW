@@ -1,4 +1,4 @@
-"""文档级 Evidence Recall、Complete Evidence 与 query-level 统计。"""
+"""Document-level Evidence Recall, Complete Evidence, and query-level stats."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from warp.audit import emit
 
 
 def serialize_ranked(results: list[SearchResult]) -> list[dict[str, Any]]:
-    """把检索结果写成 JSON 可落盘、可供阅读器复用的字典。"""
+    """Serialize ranked hits for JSON dumps and the reader cache."""
     return [
         {
             "doc_id": result.doc_id,
@@ -26,7 +26,7 @@ def serialize_ranked(results: list[SearchResult]) -> list[dict[str, Any]]:
 
 
 def ranked_from_payload(rows: list[dict[str, Any]] | None) -> list[SearchResult]:
-    """从评测缓存恢复 SearchResult，阅读器不得再调 search。"""
+    """Restore SearchResult rows from the eval cache; the reader must not re-search."""
     return [
         SearchResult(
             str(row["doc_id"]), float(row["score"]), str(row.get("source") or "cached"),

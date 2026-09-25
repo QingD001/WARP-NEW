@@ -1,4 +1,4 @@
-"""正式检索截断。主表与 IRCoT 多步评测共用，避免各处默认 k 漂移。"""
+"""Shared retrieval cutoffs for the main table and IRCoT eval."""
 
 from __future__ import annotations
 

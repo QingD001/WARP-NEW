@@ -1,4 +1,4 @@
-"""在任意检索结果上运行固定的官方 HippoRAG2 QA reader。"""
+"""Run the frozen official HippoRAG2 QA reader on arbitrary retrieval output."""
 
 from __future__ import annotations
 
@@ -28,8 +28,7 @@ def evaluate_hipporag2_reader(
     rag = hipporag_graph.backend
     if rag is None:
         raise TypeError("Reader evaluation requires an official HippoRAG2 full graph")
-    # Reader 始终使用同一个 full-graph HippoRAG 实例中的 prompt manager/QA LLM，
-    # 但 docs 由待比较的检索方法提供，因此只改变 evidence，不改变生成器。
+    # Same full-graph prompt manager / QA LLM; only the retrieved docs change.
     doc_map = {doc.id: doc for doc in documents}
     eligible = [query for query in queries if query.answer is not None]
     if not eligible:
@@ -65,7 +64,7 @@ def evaluate_hipporag2_reader(
                         "responses": raw_responses, "metadata": raw_metadata})
     em_total = f1_total = 0.0
     predictions: list[dict[str, Any]] = []
-    # 多答案问题取所有规范答案中的最佳 EM/F1，这是 QA benchmark 的常规口径。
+    # Multi-answer items take the best EM/F1 over normalized golds.
     for query, solution, original in zip(eligible, answered, solutions):
         if solution.question != query.text:
             raise RuntimeError("Reader returned answers in a different query order")

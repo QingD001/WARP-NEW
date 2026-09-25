@@ -1,6 +1,6 @@
-"""HotpotQA、2Wiki、MuSiQue 与 PopQA 的薄适配层。
+"""Thin adapters for HotpotQA, 2Wiki, and MuSiQue.
 
-适配器只处理原始 schema 差异，并强制所有 split 使用显式共享 corpus。
+They only flatten schema differences and require an explicit shared corpus.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from warp.utils import read_json_records
 
 
 def _support_titles(row: dict[str, Any]) -> list[str]:
-    """从多个 benchmark schema 提取文档级 supporting evidence ID。"""
+    """Extract document-level supporting evidence IDs from several schemas."""
     explicit = row.get("gold_doc_ids", row.get("supporting_doc_ids", []))
     if isinstance(explicit, str):
         explicit = [explicit]
@@ -55,7 +55,7 @@ def _qa_rows(path: str, prefix: str) -> tuple[list[dict[str, Any]], list[Query]]
 
 
 def _multihop(config: dict[str, Any]) -> DatasetBundle:
-    """加载三个多跳 benchmark，并确保所有 split 共享同一 corpus。"""
+    """Load a multi-hop benchmark with one shared corpus across splits."""
     required = ("corpus", "train", "dev", "test")
     missing = [key for key in required if not config.get(key)]
     if missing:
@@ -73,25 +73,10 @@ def _multihop(config: dict[str, Any]) -> DatasetBundle:
     return DatasetBundle(documents, splits["train"], splits["dev"], splits["test"])
 
 
-def _popqa(config: dict[str, Any]) -> DatasetBundle:
-    from .base import load_documents, load_queries
-    required = ("corpus", "train", "dev", "test")
-    missing = [key for key in required if not config.get(key)]
-    if missing:
-        raise ValueError(f"PopQA requires explicit paths for: {', '.join(missing)}")
-    return DatasetBundle(
-        load_documents(config["corpus"]),
-        load_queries(config["train"]),
-        load_queries(config["dev"]),
-        load_queries(config["test"]),
-    )
-
-
 LOADERS = {
     "hotpotqa": _multihop,
     "hotpot": _multihop,
     "musique": _multihop,
     "2wiki": _multihop,
     "twowiki": _multihop,
-    "popqa": _popqa,
 }

@@ -1,4 +1,4 @@
-"""分层选择 Region 构图，并用最终部署排序路径生成监督标签。"""
+"""Select a few regions to materialize and label them with the deployment ranking path."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ class ProbeOutcome:
 
 
 class RegionProber:
-    """使用与上线检索完全一致的 RRF + CrossEncoder 计算 counterfactual gain。"""
+    """Counterfactual gain with the same RRF + CrossEncoder path as deployment."""
 
     def __init__(
         self, graph_builder: GraphBuilder, graph_retriever: GraphRetriever, reranker: Reranker,

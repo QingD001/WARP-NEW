@@ -1,4 +1,4 @@
-"""论文结果所需的确定性 paired bootstrap 与配对随机化检验。"""
+"""Deterministic paired bootstrap and paired randomization tests."""
 
 from __future__ import annotations
 

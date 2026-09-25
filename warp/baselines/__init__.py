@@ -1,4 +1,4 @@
-"""正式 corpus-level graph construction baselines。"""
+"""Corpus-level graph-construction baselines."""
 
 from .global_graph import GlobalBaselineFactory, GlobalGraphBaseline
 

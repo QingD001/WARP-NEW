@@ -1,8 +1,9 @@
-"""官方 HippoRAG2 的区域物化、检索和成本审计适配器。
+"""Adapter for official HippoRAG2 regional indexes, retrieval, and cost audit.
 
-本模块不重写任何 HippoRAG2 图算法；它只负责把 WARP Region 映射为互相隔离的
-官方 index，并把官方检索结果映射回稳定的 WARP document ID。Selective Graph、
-Graph baseline 和 Full Graph 因而共享完全相同的 OpenIE/embedding/PPR 后端。
+This module does not reimplement HippoRAG2. It maps each WARP region to an
+isolated official index and maps official hits back to stable document IDs.
+Selective graphs, graph baselines, and the full graph share the same
+OpenIE / embedding / PPR backend.
 """
 
 from __future__ import annotations
@@ -90,7 +91,7 @@ class _UsageTracker:
         self._lock = threading.Lock()
 
     def add(self, metadata: dict[str, Any], cache_hit: bool) -> None:
-        """同时累计逻辑 cold cost 与真正发生 API 请求的 physical cost。"""
+        """Accumulate logical cold-start cost and physical API cost."""
         missing = {"prompt_tokens", "completion_tokens"} - set(metadata)
         if missing:
             raise RuntimeError(f"HippoRAG LLM usage metadata is missing fields: {sorted(missing)}")
@@ -111,7 +112,7 @@ class _UsageTracker:
                 row["physical_output_tokens"] += completion
 
     def get(self, phase: str) -> dict[str, int]:
-        """返回指定阶段计数快照，调用方用前后差得到单次成本。"""
+        """Snapshot counters for one phase; callers take a before/after delta."""
         return dict(self.values.get(phase, {}))
 
 
@@ -156,7 +157,7 @@ class HippoRAG2GraphBuilder:
             )
 
     def estimate_cost(self, region: Region, documents: list[Document]) -> float:
-        """正式构图前同样使用区域文本 token proxy 做 matched budget。"""
+        """Pre-build token proxy over region text, used only as a cost estimate."""
         selected = set(region.doc_ids)
         return float(sum(len(tokenize(doc.content)) for doc in documents if doc.id in selected))
 
@@ -190,7 +191,7 @@ class HippoRAG2GraphBuilder:
         disable_thinking = bool(self.config.disable_llm_thinking)
 
         def counted_infer(*args: Any, **kwargs: Any) -> Any:
-            """透明转发 infer，并从官方 metadata/cache flag 读取 token。"""
+            """Forward infer() and read tokens from official metadata / cache flags."""
             if disable_thinking:
                 extra = dict(kwargs.get("extra_body") or {})
                 extra.setdefault("thinking", {"type": "disabled"})
@@ -212,7 +213,7 @@ class HippoRAG2GraphBuilder:
         return tracker
 
     def _ensure_shared_resources(self, BaseConfig: Any) -> None:
-        """延迟创建并跨区域共享昂贵的 LLM 与 embedding 模型权重。"""
+        """Lazily create LLM and embedding weights and share them across regions."""
         if self._shared_llm is not None and self._shared_embedding_model is not None and self._usage_tracker is not None:
             return
         from hipporag.llm import _get_llm_class
@@ -255,7 +256,7 @@ class HippoRAG2GraphBuilder:
         return {key: after.get(key, 0) - before.get(key, 0) for key in set(after) | set(before)}
 
     def _base_config(self, BaseConfig: Any, artifact_dir: Path) -> Any:
-        """把 WARP 配置逐项映射到锁定版本的官方 BaseConfig。"""
+        """Map WARP settings onto the pinned official BaseConfig."""
         dataset = self.config.dataset
         if dataset == "2wiki":
             dataset = "2wikimultihopqa"
@@ -284,7 +285,7 @@ class HippoRAG2GraphBuilder:
         )
 
     def build(self, region: Region, documents: list[Document]) -> RegionalGraph:
-        """在独立 artifact 目录中调用官方 `HippoRAG.index(List[Chunk])`。"""
+        """Call official HippoRAG.index() in an isolated artifact directory."""
         HippoRAG, Chunk, BaseConfig, version = self._imports()
         self._validate_upstream_api(HippoRAG, Chunk)
         if version != SUPPORTED_API_VERSION:
@@ -296,7 +297,7 @@ class HippoRAG2GraphBuilder:
         if missing:
             raise KeyError(f"Region {region.id} refers to unknown documents: {missing[:5]}")
         selected = [by_id[doc_id] for doc_id in region.doc_ids]
-        # 官方 chunk store 以内容哈希为主键；重复文本会破坏 doc-level evidence ID。
+        # Official chunk store keys by content hash; duplicate text breaks doc IDs.
         contents: dict[str, str] = {}
         for doc in selected:
             previous = contents.get(doc.content)
@@ -313,7 +314,7 @@ class HippoRAG2GraphBuilder:
         config = self._base_config(BaseConfig, artifact_dir)
         self._ensure_shared_resources(BaseConfig)
         tracker = self._usage_tracker
-        # 图和 vector stores 每个 region 独立，模型权重可以安全共享。
+        # Per-region graph/vector stores; model weights can be shared.
         rag = HippoRAG(
             global_config=config, extraction_llm=self._shared_llm, qa_llm=self._shared_llm,
             embedding_model=self._shared_embedding_model,
@@ -342,7 +343,7 @@ class HippoRAG2GraphBuilder:
             )
 
         usage = self._usage_delta(tracker.get("construction"), before_usage)
-        # embedding API 未统一返回 token usage，因此对实际写入三套 store 的文本计数。
+        # Embedding APIs do not always return usage; count texts written to the three stores.
         embedding_texts: list[str] = []
         for store in (rag.chunk_embedding_store, rag.entity_embedding_store, rag.fact_embedding_store):
             embedding_texts.extend(list(store.get_all_texts()))
@@ -402,7 +403,7 @@ class HippoRAG2GraphRetriever:
         self.graph_seeded_calls = 0
 
     def search(self, query: str, graph: RegionalGraph, k: int = 10) -> list[SearchResult]:
-        """直接运行官方 query-to-fact、fact filter、personalization 与 PPR。"""
+        """Run official query-to-fact, fact filter, personalization, and PPR."""
         rag = graph.backend
         if rag is None:
             raise TypeError("HippoRAG2GraphRetriever requires a graph built by HippoRAG2GraphBuilder")
@@ -459,7 +460,7 @@ class HippoRAG2GraphRetriever:
         return results
 
     def stats(self) -> dict[str, float | int]:
-        """汇总整个实验期间官方图在线检索的 token 与 wall time。"""
+        """Aggregate official online-graph retrieval tokens and wall time."""
         return {
             "calls": self.calls, "wall_seconds": self.wall_seconds,
             "dense_fallback_calls": self.dense_fallback_calls,
@@ -471,13 +472,13 @@ class HippoRAG2GraphRetriever:
         }
 
     def delta(self, before: dict[str, float | int]) -> dict[str, float | int]:
-        """返回一次方法评测独立产生的在线图检索成本。"""
+        """Online graph-retrieval cost for one method evaluation."""
         after = self.stats()
         return {key: after[key] - before[key] for key in after}
 
 
 class _HippoRAGPassageEncoder:
-    """让全局 Dense baseline 复用 HippoRAG2 的同一个 encoder 和 query instruction。"""
+    """Reuse the HippoRAG2 encoder and query instruction for the dense baseline."""
     def __init__(self, model: Any) -> None:
         self.model = model
 
@@ -486,15 +487,15 @@ class _HippoRAGPassageEncoder:
         return values.tolist() if hasattr(values, "tolist") else [list(row) for row in values]
 
     def encode(self, texts: list[str]) -> list[list[float]]:
-        """兼容通用 encoder 接口，默认按 passage 编码。"""
+        """Generic encoder interface; defaults to passage encoding."""
         return self.encode_documents(texts)
 
     def encode_documents(self, texts: list[str]) -> list[list[float]]:
-        """使用官方 embedding 模型无 query instruction 编码 passage。"""
+        """Encode passages with the official embedding model, no query instruction."""
         return self._rows(self.model.batch_encode(texts, instruction="", norm=True))
 
     def encode_queries(self, texts: list[str]) -> list[list[float]]:
-        """使用官方 query_to_passage instruction 编码 query。"""
+        """Encode queries with the official query_to_passage instruction."""
         from hipporag.prompts.linking import get_query_instruction
         return self._rows(self.model.batch_encode(
             texts, instruction=get_query_instruction("query_to_passage"), norm=True,

@@ -1,4 +1,4 @@
-"""可复现、支持区域过滤的 Okapi BM25 实现。"""
+"""Reproducible Okapi BM25 with optional region filtering."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ class BM25Retriever:
         self.avgdl = 0.0
 
     def fit(self, documents: list[Document]) -> "BM25Retriever":
-        """构建词频、倒排表、IDF 和平均文档长度统计。"""
+        """Build term frequencies, postings, IDF, and mean document length."""
         self.documents = list(documents)
         self.term_freqs = [Counter(tokenize(doc.content)) for doc in documents]
         postings: dict[str, list[tuple[int, int]]] = defaultdict(list)
@@ -36,7 +36,7 @@ class BM25Retriever:
         return self
 
     def search(self, query: str, k: int = 10, doc_ids: set[str] | None = None) -> list[SearchResult]:
-        """按 BM25 得分检索；doc_ids 用于图区域内部的受限 seed 检索。"""
+        """BM25 search; doc_ids restricts the pool for in-region seeds."""
         if k <= 0:
             return []
         scores: dict[int, float] = defaultdict(float)

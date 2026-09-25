@@ -1,8 +1,9 @@
-"""WARP-G 的训练/设计阶段与测试阶段编排器。
+"""Orchestrate WARP-G physical design and held-out evaluation.
 
-`fit` 是唯一允许读取 train/design query 的设计入口；评测函数只接收显式传入的
-dev/test query。图 builder、图 retriever、base retriever 和 reranker 均可注入，
-因此 advisor 算法不绑定具体 GraphRAG 实现。
+`fit` is the only entry that may read train/design queries. Evaluation
+functions take explicitly passed dev/test queries. The graph builder,
+retriever, base retriever, and reranker are injectable, so the advisor does
+not depend on one GraphRAG backend.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ from warp.retrieval.reranker import Reranker
 
 @dataclass
 class WARPConfig:
-    """与具体 HippoRAG2 参数解耦的 WARP 物理设计超参数。"""
+    """WARP physical-design knobs, independent of HippoRAG2 internals."""
     retrieval_k: int = 10
     candidate_k: int = 50
     routing_k: int = 20
@@ -124,7 +125,7 @@ class WARPG:
         self._feedback_documents = None
 
     def fit(self, bundle: DatasetBundle) -> "WARPG":
-        """完成基础索引、分区、特征、probe 和 收益估计。"""
+        """Build the base index, partition, features, probes, and gain estimates."""
         if not bundle.documents or not bundle.train:
             raise ValueError("WARP-G requires a non-empty corpus and training/design queries")
         doc_ids = [document.id for document in bundle.documents]
@@ -164,11 +165,11 @@ class WARPG:
         self.selection_cache = {}
         self._feedback_documents = None
         self.design_timings = {}
-        # Base 索引覆盖 100% corpus，是所有方法共享且不计为选择性 Graph 成本的底座。
+        # Base indexes the full corpus and is shared; it is not a selective-graph cost.
         started = time.perf_counter()
         self.base.fit(bundle.documents)
         self.design_timings["base_index_seconds"] = time.perf_counter() - started
-        # 下面所有 workload 信号只来自 bundle.train，避免 test leakage。
+        # Workload signals come only from bundle.train to avoid test leakage.
         started = time.perf_counter()
         self.coaccess = CoaccessGraphBuilder(
             self.config.coaccess_k, self.config.semantic_k, self.config.semantic_lambda,
@@ -215,7 +216,7 @@ class WARPG:
             self.regions, bundle.documents, bundle.train, self.base, self.coaccess,
         )
         self.design_timings["feature_seconds"] = time.perf_counter() - started
-        # 选择前只能使用 token proxy；actual cost 必须等真实 build 后才可观测。
+        # Selection uses a token proxy; actual cost is observed only after build.
         self.costs = {region.id: self.graph_builder.estimate_cost(region, bundle.documents)
                       for region in self.regions}
         prober = RegionProber(
@@ -246,7 +247,7 @@ class WARPG:
         return self.search(query, k, {graph.region_id} if graph is not None else set())
 
     def routing_diagnostics(self, queries: list[Any]) -> dict[str, float]:
-        """测量 Base router 能否命中 gold evidence 所在 Region。"""
+        """Whether the base router hits the gold-evidence regions."""
         eligible = [query for query in queries if query.gold_doc_ids]
         if not eligible:
             raise ValueError("Routing diagnostics require gold evidence")
@@ -264,7 +265,7 @@ class WARPG:
         }
 
     def _probe_interactions(self) -> dict[str, Any]:
-        """直接测量区域图二阶交互，检验独立 gain 假设。"""
+        """Measure pairwise region-graph interactions vs independent-gain additivity."""
         if self.bundle is None:
             raise RuntimeError("fit must be called first")
         region_ids = sorted(self.probes)
@@ -302,11 +303,11 @@ class WARPG:
 
     @property
     def full_graph_cost(self) -> float:
-        """返回所有区域 token proxy 之和，仅作成本对照分母，不再用于截断。"""
+        """Sum of region token proxies; a cost denominator, not a cutoff."""
         return sum(self.costs.values())
 
     def select(self, method: str = "warp") -> list[str]:
-        """WARP 按自身规则选完全部合格区域；controls 只换公式并对齐区域个数。"""
+        """WARP selects its own regions; controls swap the formula and match the count."""
         method = method.lower()
         if method == "warp" and self.config.selection_mode == "conditional":
             key = "full_pipeline"
@@ -341,7 +342,7 @@ class WARPG:
         return self.search_multistep(query, k, lambda q, depth, trace: self._search_base_once(q, depth, method))
 
     def _search_base_once(self, query: str, k: int | None = None, method: str = "hybrid", *, trace=None) -> list[SearchResult]:
-        """所有 Base baseline 也走与图方法相同的 candidate depth 和 CrossEncoder。"""
+        """Base baselines use the same candidate depth and CrossEncoder as graph methods."""
         k = self.config.retrieval_k if k is None else k
         retriever = {"bm25": self.base.bm25, "dense": self.base.dense, "hybrid": self.base}.get(method)
         if retriever is None:
@@ -353,7 +354,7 @@ class WARPG:
         )
 
     def materialize(self, region_ids: list[str]) -> None:
-        """按需构建尚未缓存的区域图；probe 图会被安全复用。"""
+        """Build uncached regional graphs; probe graphs are reused."""
         if self.bundle is None:
             raise RuntimeError("fit must be called first")
         for region_id in region_ids:
@@ -368,7 +369,7 @@ class WARPG:
 
     def _search_once(self, query: str, k: int | None = None, selected_regions: set[str] | None = None,
                *, trace: dict[str, Any] | None = None) -> list[SearchResult]:
-        """检索显式选区；空集合表示 Base，缓存本身不代表部署选择。"""
+        """Search explicit selected regions; empty set is Base. Cache is not a deploy set."""
         k = self.config.retrieval_k if k is None else k
         if selected_regions is None:
             raise ValueError("selected_regions must be explicit; pass set() for Base-only retrieval")
@@ -380,7 +381,7 @@ class WARPG:
         if missing:
             raise ValueError(f"Selected regions are not materialized: {sorted(missing)}; call materialize first")
         base_results = self.base.search(query, self.config.candidate_k)
-        # 路由是确定性的文档归属查表，不使用 LLM/agent 做检索决策。
+        # Routing is a deterministic doc-to-region lookup; no LLM/agent decision.
         routed: list[str] = []
         for result in base_results[:self.config.routing_k]:
             region_id = self.doc_region[result.doc_id]
@@ -419,7 +420,7 @@ class WARPG:
         return self.full_graph
 
     def generate_next_query(self, prompt: str) -> str:
-        """IRCoT 下一步查询生成；没有共享 LLM 时返回 END 以停止。"""
+        """IRCoT next-query generation; returns END if no shared LLM is available."""
         self.last_generation_usage = {}
         llm = getattr(self.graph_builder, "_shared_llm", None)
         tracker = getattr(self.graph_builder, "_usage_tracker", None)
@@ -450,7 +451,7 @@ class WARPG:
         return self.search_multistep(query, k, lambda q, depth, trace: self._search_full_graph_once(q, depth))
 
     def _search_full_graph_once(self, query: str, k: int | None = None, *, trace=None) -> list[SearchResult]:
-        """融合 Base 与真正 corpus-wide 单图结果，并使用相同 reranker。"""
+        """Fuse Base with the corpus-wide graph and apply the same reranker."""
         k = self.config.retrieval_k if k is None else k
         graph = self.materialize_full_graph()
         base_results = self.base.search(query, self.config.candidate_k)
@@ -461,19 +462,19 @@ class WARPG:
         )
 
     def evaluate_full_graph(self, queries: list[Any], ks: tuple[int, ...] | None = None) -> dict[str, Any]:
-        """评测 Base + Full Graph fusion。"""
+        """Evaluate Base + Full Graph fusion."""
         self.materialize_full_graph()
         return self.evaluate_search(queries, lambda q, k, trace: self._search_full_graph_once(q, k, trace=trace), ks)
 
     def evaluate_full_graph_only(self, queries: list[Any], ks: tuple[int, ...] | None = None) -> dict[str, Any]:
-        """评测官方图检索通路；仍使用共享 CrossEncoder。"""
+        """Evaluate official graph retrieval; still uses the shared CrossEncoder."""
         graph = self.materialize_full_graph()
         return self.evaluate_search(queries, lambda q, k, trace: fuse_and_rerank(
             q, [self.graph_retriever.search(q, graph, self.config.candidate_k)], self.reranker,
             k=k, candidate_k=self.config.candidate_k, source="hipporag2_reranked", trace=trace), ks)
 
     def evaluate(self, queries: list[Any], selected_regions: list[str], ks: tuple[int, ...] | None = None) -> dict[str, Any]:
-        """物化给定区域并保存同一次检索的候选轨迹，支持逐题消融审计。"""
+        """Materialize regions and keep per-query candidate traces for ablation."""
         self.materialize(selected_regions)
         return self.evaluate_search(queries, lambda q, k, trace: self._search_once(
             q, k, set(selected_regions), trace=trace), ks)
@@ -499,12 +500,12 @@ class WARPG:
         return output
 
     def evaluate_base(self, queries: list[Any], method: str, ks: tuple[int, ...] | None = None) -> dict[str, Any]:
-        """评测 BM25、Dense 或 Hybrid 基础检索。"""
+        """Evaluate BM25, Dense, or Hybrid base retrieval."""
         normalized = "hybrid" if method.lower() == "base" else method.lower()
         return self.evaluate_search(queries, lambda q, k, trace: self._search_base_once(q, k, normalized, trace=trace), ks)
 
     def report(self) -> dict[str, Any]:
-        """导出物理设计、probe 成本、特征和预测结果供 artifact 审计。"""
+        """Export design, probe costs, features, and predictions for audit."""
         probe_cost = aggregate_costs([outcome.graph.cost for outcome in self.probes.values()])
         observed = sorted(outcome.gain for outcome in self.probes.values())
         nonnegative = sorted(max(value, 0.0) for value in observed)

@@ -113,9 +113,7 @@ def _save_state(path: Path, state: dict) -> None:
 
 def _start_run(args: argparse.Namespace, batch: int, dtype: str) -> int:
     env = os.environ.copy()
-    env["HF_HOME"] = env.get("HF_HOME") or "/root/data/hf-cache"
     env.pop("TRANSFORMERS_CACHE", None)
-    env["OPENAI_BASE_URL"] = env.get("OPENAI_BASE_URL") or "https://yibuapi.com/v1"
     env["WARP_EMBEDDING_BATCH_SIZE"] = str(batch)
     env["WARP_EMBEDDING_DTYPE"] = dtype
     env["CUDA_VISIBLE_DEVICES"] = env.get("CUDA_VISIBLE_DEVICES") or "0"
@@ -148,7 +146,7 @@ def main() -> int:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--log", type=Path, required=True)
-    parser.add_argument("--cwd", type=Path, default=Path("/root/zjl/WARP-G"))
+    parser.add_argument("--cwd", type=Path, default=Path.cwd())
     parser.add_argument("--python", default="python3")
     parser.add_argument("--interval", type=float, default=20.0)
     parser.add_argument("--max-restarts", type=int, default=4)

@@ -1,4 +1,4 @@
-"""官方 HippoRAG2 图后端的公开接口。"""
+"""Public API for the official HippoRAG2 graph backend."""
 
 from .builder import GraphBuilder, RegionalGraph
 from .retriever import GraphRetriever

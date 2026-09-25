@@ -1,4 +1,4 @@
-"""与常见开放域 QA 评测一致的答案归一化、Exact Match 和 token F1。"""
+"""Open-domain QA answer normalization, Exact Match, and token F1."""
 
 from __future__ import annotations
 
@@ -15,12 +15,12 @@ def _normalize(text: str) -> str:
 
 
 def answer_em(prediction: str, gold: str) -> float:
-    """忽略大小写、标点、英语冠词和多余空格的 exact match。"""
+    """Exact match after lowercasing and stripping punctuation/articles."""
     return float(_normalize(prediction) == _normalize(gold))
 
 
 def answer_f1(prediction: str, gold: str) -> float:
-    """基于归一化 token multiset overlap 计算 F1。"""
+    """F1 from normalized token-multiset overlap."""
     predicted = _normalize(prediction).split()
     expected = _normalize(gold).split()
     common = sum((Counter(predicted) & Counter(expected)).values())

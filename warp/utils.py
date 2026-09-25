@@ -1,4 +1,4 @@
-"""无第三方依赖的文本、向量、JSON 与批处理辅助函数。"""
+"""Dependency-free helpers for text, vectors, JSON, and batching."""
 
 from __future__ import annotations
 
@@ -15,18 +15,18 @@ TOKEN_RE = re.compile(r"[\w]+", re.UNICODE)
 
 
 def tokenize(text: str) -> list[str]:
-    """提供 BM25 与构图前成本估算共用的确定性分词。"""
+    """Deterministic tokenizer shared by BM25 and pre-build cost estimates."""
     return TOKEN_RE.findall(text.lower())
 
 
 def stable_hash(value: str, modulo: int) -> int:
-    """使用稳定哈希，避免 Python 进程级 hash seed 破坏实验复现。"""
+    """Stable hash; avoids Python process-level hash randomization."""
     digest = hashlib.blake2b(value.encode("utf-8"), digest_size=8).digest()
     return int.from_bytes(digest, "little") % modulo
 
 
 def cosine(a: list[float], b: list[float]) -> float:
-    """计算两个向量的余弦相似度；零向量返回 0。"""
+    """Cosine similarity; zero vectors return 0."""
     dot = sum(x * y for x, y in zip(a, b))
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(y * y for y in b))
@@ -34,7 +34,7 @@ def cosine(a: list[float], b: list[float]) -> float:
 
 
 def minmax(values: list[float]) -> list[float]:
-    """把数值缩放到 [0,1]，常量零列保持为零。"""
+    """Scale values to [0, 1]; a constant-zero column stays zero."""
     if not values:
         return []
     lo, hi = min(values), max(values)
@@ -44,7 +44,7 @@ def minmax(values: list[float]) -> list[float]:
 
 
 def read_json_records(path: str | Path) -> list[dict[str, Any]]:
-    """读取 JSONL、JSON list 或常见顶层 data/documents/queries 容器。"""
+    """Read JSONL, a JSON list, or a data/documents/queries wrapper."""
     path = Path(path)
     with path.open(encoding="utf-8") as handle:
         if path.suffix == ".jsonl":
@@ -59,7 +59,7 @@ def read_json_records(path: str | Path) -> list[dict[str, Any]]:
 
 
 def write_json(path: str | Path, value: Any) -> None:
-    """创建父目录并以 UTF-8、可读缩进形式原子化语义地写结果。"""
+    """Create parents and write UTF-8 indented JSON atomically."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
@@ -77,6 +77,6 @@ def write_json(path: str | Path, value: Any) -> None:
 
 
 def batches(values: list[Any], size: int) -> Iterable[list[Any]]:
-    """按固定大小产生连续 batch，最后一批允许不足。"""
+    """Yield contiguous batches; the last batch may be shorter."""
     for start in range(0, len(values), size):
         yield values[start:start + size]

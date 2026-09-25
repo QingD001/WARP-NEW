@@ -1,4 +1,4 @@
-"""基础检索、融合与重排组件的公开接口。"""
+"""Public API for base retrieval, fusion, and reranking."""
 
 from .bm25 import BM25Retriever
 from .dense import DenseRetriever

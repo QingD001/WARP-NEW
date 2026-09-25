@@ -1,7 +1,7 @@
-"""IRCoT 风格多步检索：每步检索 → 推理扩展 → 再检索，并落盘全量 step log。
+"""IRCoT-style multi-step retrieval with a full per-step log.
 
-这与 `warp.retrieval.multistep.retrieve_steps` 的 passage-feedback 不是同一条协议。
-检索决策不读取 gold；gold 只用于事后逐步指标。
+This is not the same protocol as `warp.retrieval.multistep.retrieve_steps`.
+Retrieval never reads gold; gold is used only for post-hoc step metrics.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ Do not answer the question. Reply with END or a search query only.
 
 
 def merge_ranked(existing: list[SearchResult], incoming: list[SearchResult]) -> list[SearchResult]:
-    """按 doc_id 去重，保留更高分，重写 rank。"""
+    """Deduplicate by doc_id, keep the higher score, and rewrite ranks."""
     best: dict[str, SearchResult] = {}
     for result in existing + incoming:
         previous = best.get(result.doc_id)
@@ -80,7 +80,7 @@ def run_multistep_retrieval(
     documents: Mapping[str, Document] | None = None,
     snippet_chars: int = 400,
 ) -> dict[str, Any]:
-    """对每条 query 跑固定步数上限的 IRCoT 检索，并可选写入 JSONL 轨迹。"""
+    """Run bounded IRCoT retrieval per query and optionally write a JSONL trace."""
     if max_steps < 1:
         raise ValueError("multistep max_steps must be >= 1")
     if retrieval_k <= 0 or snippet_chars <= 0:

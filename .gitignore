@@ -4,6 +4,19 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+# Local trees and lab-path symlinks; do not commit either form.
+/data
+/outputs
+data/
 outputs/
 data/raw/
 data/processed/
+external/
+HippoRAG/
+LinearRAG/
+LightRAG/
+vendor/
+.hf-cache/
+.env
+*.log
+experiment_preflight*.json

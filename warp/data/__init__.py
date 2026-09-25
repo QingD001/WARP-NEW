@@ -1,4 +1,4 @@
-"""数据加载公开接口。"""
+"""Public data-loading API."""
 
 from .base import load_bundle, load_crossfit_bundles
 

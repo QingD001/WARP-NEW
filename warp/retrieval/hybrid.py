@@ -1,4 +1,4 @@
-"""BM25、Dense 与图结果所共用的 Reciprocal Rank Fusion。"""
+"""Reciprocal Rank Fusion shared by BM25, dense, and graph lists."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def reciprocal_rank_fusion(
     weights: Sequence[float] | None = None,
     source: str = "rrf",
 ) -> list[SearchResult]:
-    """按排名而非异构原始分数融合结果，并按 doc_id 确定性打破平局。"""
+    """Fuse by rank, not raw scores; break ties by doc_id."""
     scores: dict[str, float] = defaultdict(float)
     regions: dict[str, str | None] = {}
     if weights is None:
@@ -37,20 +37,20 @@ def reciprocal_rank_fusion(
 
 
 class HybridRetriever:
-    """所有方法都拥有的 BM25 + Dense 基础物理表示。"""
+    """Shared BM25 + dense base index used by every method."""
     def __init__(self, bm25: BM25Retriever, dense: DenseRetriever, rrf_constant: int = 60) -> None:
         self.bm25 = bm25
         self.dense = dense
         self.rrf_constant = rrf_constant
 
     def fit(self, documents: list[Document]) -> "HybridRetriever":
-        """在同一 corpus 上同时拟合 lexical 与 dense 两套 Base 索引。"""
+        """Fit lexical and dense indexes on the same corpus."""
         self.bm25.fit(documents)
         self.dense.fit(documents)
         return self
 
     def search(self, query: str, k: int = 10, doc_ids: set[str] | None = None) -> list[SearchResult]:
-        """各取更深候选后做 RRF，降低单路截断造成的候选损失。"""
+        """RRF over deeper per-channel pools to reduce single-list truncation."""
         depth = max(k * 2, k)
         return reciprocal_rank_fusion(
             [self.bm25.search(query, depth, doc_ids), self.dense.search(query, depth, doc_ids)],
@@ -63,7 +63,7 @@ def fuse_and_rerank(
     k: int, candidate_k: int, source: str, weights: Sequence[float] | None = None,
     trace: dict[str, Any] | None = None,
 ) -> list[SearchResult]:
-    """供 Base、probe、selective 与 Full Graph 共用的唯一最终排序路径。"""
+    """Single final ranking path for Base, probe, selective, and Full Graph."""
     if candidate_k < k:
         raise ValueError("candidate_k must be at least k")
     fused = reciprocal_rank_fusion(result_lists, candidate_k, weights=weights, source=source)

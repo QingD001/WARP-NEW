@@ -1,4 +1,4 @@
-"""WARP-G 的无预算区域选择器。"""
+"""Budget-free region selector for WARP-G."""
 
 from __future__ import annotations
 
@@ -8,9 +8,10 @@ from warp.models import RegionFeatures
 
 
 class RegionSelector:
-    """只替换区域排序公式；WARP 按 score>0 自然结束，controls 取同样多的区域。
+    """Swap only the ranking formula. WARP keeps regions with score>0; controls take the same count.
 
-    对照只保留 frequency / gain（以及随机打乱）；不再用构图成本排序或截断。
+    Controls are frequency, gain, and a seeded shuffle. Construction cost is
+    not used to rank or truncate.
     """
 
     METHODS = {"warp", "random_region", "frequency_only", "gain_only"}

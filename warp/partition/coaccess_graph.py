@@ -1,7 +1,8 @@
-"""由 train/design workload 构造便宜的文档共访问图。
+"""Cheap document co-access graph from the train/design workload.
 
-这里的图仅用于 corpus partition，不是知识图谱。边权由 query top-k 共现次数和
-小权重语义 kNN 两部分组成；dev/test query 永远不能传入该 builder。
+Used only for corpus partition, not as a knowledge graph. Weights mix query
+top-k co-occurrence with a small semantic kNN term. Dev/test queries must not
+be passed to this builder.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from warp.retrieval.ann import semantic_knn
 
 @dataclass
 class CoaccessGraph:
-    """保存总边、query 边、semantic 边及可审计的每题检索结果。"""
+    """Total, query, and semantic edges plus per-query retrieval traces."""
     nodes: list[str]
     edges: dict[tuple[str, str], float]
     query_edges: dict[tuple[str, str], float]
@@ -26,7 +27,7 @@ class CoaccessGraph:
     query_results: dict[str, list[str]]
 
     def neighbors(self) -> dict[str, dict[str, float]]:
-        """把无向 edge map 展开为 label propagation 使用的邻接表。"""
+        """Expand an undirected edge map into an adjacency list."""
         output: dict[str, dict[str, float]] = {node: {} for node in self.nodes}
         for (left, right), weight in self.edges.items():
             output[left][right] = weight
@@ -35,7 +36,7 @@ class CoaccessGraph:
 
 
 class CoaccessGraphBuilder:
-    """实现 design.md 中 w_ij = w_query + lambda * w_semantic。"""
+    """w_ij = w_query + lambda * w_semantic."""
     def __init__(self, top_k: int = 20, semantic_k: int = 3, semantic_lambda: float = 0.05,
                  min_semantic_similarity: float = 0.0) -> None:
         self.top_k = top_k
@@ -44,8 +45,8 @@ class CoaccessGraphBuilder:
         self.min_semantic_similarity = min_semantic_similarity
 
     def build(self, documents: list[Document], queries: list[Query], retriever: HybridRetriever) -> CoaccessGraph:
-        """为每个设计 query 的 top-k 文档两两加边，再补语义邻居弱边。"""
-        # query_edges 是真实 workload 共访问强度，也是社区划分的主要信号。
+        """Add pairwise edges from each design query top-k, then weak semantic edges."""
+        # Query edges are the main community-detection signal.
         query_edges: dict[tuple[str, str], float] = defaultdict(float)
         query_results: dict[str, list[str]] = {}
         for query in queries:
@@ -54,7 +55,7 @@ class CoaccessGraphBuilder:
             for left, right in combinations(sorted(set(ids)), 2):
                 query_edges[(left, right)] += 1.0
 
-        # semantic_edges 只避免未被训练 query 覆盖的文档完全孤立。
+        # Semantic edges keep documents unseen by train queries from being isolated.
         semantic_edges: dict[tuple[str, str], float] = defaultdict(float)
         if self.semantic_k > 0 and self.semantic_lambda > 0:
             dense: DenseRetriever = retriever.dense

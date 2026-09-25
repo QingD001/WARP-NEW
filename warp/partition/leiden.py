@@ -1,4 +1,4 @@
-"""把共访问图划分为稳定 Region 的社区发现实现。"""
+"""Community detection that splits the co-access graph into stable regions."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from .coaccess_graph import CoaccessGraph
 
 
 class RegionPartitioner:
-    """使用 Leiden 将共访问图划分为稳定 Region。"""
+    """Leiden partition of the co-access graph into stable regions."""
 
     def __init__(self, resolution: float = 1.0, seed: int = 42, min_region_size: int = 1) -> None:
         self.resolution = resolution
@@ -17,7 +17,7 @@ class RegionPartitioner:
         self.min_region_size = min_region_size
 
     def partition(self, graph: CoaccessGraph) -> list[Region]:
-        """优先运行 Leiden，随后合并过小社区并生成稳定的 rXXXX ID。"""
+        """Run Leiden, merge tiny communities, and assign stable rXXXX IDs."""
         membership = self._leiden(graph)
         groups: dict[int, list[str]] = defaultdict(list)
         for node, community in zip(graph.nodes, membership):
@@ -40,7 +40,7 @@ class RegionPartitioner:
         return list(partition.membership)
 
     def _merge_small(self, groups: dict[int, list[str]], graph: CoaccessGraph) -> dict[int, list[str]]:
-        """把小社区并入连接权重最大的合格社区，避免大量碎片图。"""
+        """Merge tiny communities into the strongest eligible neighbor."""
         if self.min_region_size <= 1 or len(groups) <= 1:
             return groups
         node_group = {node: group for group, nodes in groups.items() for node in nodes}

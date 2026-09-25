@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""下载并检出论文实验锁定的作者官方 baseline 仓库。"""
+"""Clone and check out the pinned official baseline repositories."""
 
 from __future__ import annotations
 

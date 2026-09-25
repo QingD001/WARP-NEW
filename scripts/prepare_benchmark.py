@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""把原始共享 corpus/QA 文件规范化为 WARP-G 可审计数据集。
+"""Normalize a shared-corpus QA dump into an auditable WARP-G dataset.
 
-脚本只接受 canonical train/dev/test split，校验证据 ID 全部存在，并写 split_manifest.json。
+Accepts only canonical train/dev/test splits, checks that every evidence ID
+exists, and writes split_manifest.json.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from typing import Any
 
 
 def read_records(path: Path) -> list[dict[str, Any]]:
-    """读取原始 benchmark JSON list。"""
+    """Read a raw benchmark JSON list."""
     with path.open(encoding="utf-8") as handle:
         value = json.load(handle)
     if not isinstance(value, list):
@@ -23,7 +24,7 @@ def read_records(path: Path) -> list[dict[str, Any]]:
 
 
 def supporting_titles(row: dict[str, Any]) -> list[str]:
-    """统一抽取显式 supporting facts、support paragraphs 与 gold IDs。"""
+    """Extract supporting facts, support paragraphs, and gold IDs."""
     explicit = row.get("gold_doc_ids", row.get("supporting_doc_ids", []))
     if explicit:
         values = [explicit] if isinstance(explicit, str) else explicit
@@ -49,7 +50,7 @@ def supporting_titles(row: dict[str, Any]) -> list[str]:
 
 
 def normalize_question(row: dict[str, Any], index: int) -> dict[str, Any]:
-    """映射为共享 query schema，并保存分层所需 type/hops。"""
+    """Map to the shared query schema, keeping type/hops for stratification."""
     return {
         "id": str(row.get("_id", row.get("id", f"q-{index}"))),
         "query": str(row.get("question", row.get("query", ""))),
@@ -61,7 +62,7 @@ def normalize_question(row: dict[str, Any], index: int) -> dict[str, Any]:
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
-    """以 UTF-8 JSONL 写出规范记录。"""
+    """Write normalized records as UTF-8 JSONL."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
@@ -77,7 +78,7 @@ def sha256(path: Path) -> str:
 
 
 def main() -> None:
-    """解析 CLI、规范化记录、验证 evidence identity 并固化 split。"""
+    """Parse CLI, normalize records, check evidence IDs, and freeze splits."""
     parser = argparse.ArgumentParser(description="Normalize a shared-corpus QA benchmark for WARP-G")
     parser.add_argument("--corpus", required=True, type=Path)
     parser.add_argument("--train-questions", required=True, type=Path)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把四份自描述 JSON artifact 展开为论文制表/绘图使用的 tidy CSV。"""
+"""Flatten self-describing paper JSON artifacts into tidy CSV tables."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def _read(path: Path) -> dict[str, Any]:
 
 
 def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
-    """对异构指标取字段并集；嵌套 cost/list 以 JSON cell 保真保存。"""
+    """Union columns across heterogeneous rows; store nested costs/lists as JSON cells."""
     path.parent.mkdir(parents=True, exist_ok=True)
     columns = sorted({key for row in rows for key in row})
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -37,11 +37,11 @@ def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def main() -> None:
-    """合并数据集维度并导出 baseline、curve trial/summary 与 reader 表。"""
+    """Add a dataset column and write baseline, curve, summary, and reader tables."""
     parser = argparse.ArgumentParser(description="Export WARP-G paper JSON results as tidy CSV tables")
     parser.add_argument("--input-dir", type=Path, default=Path("outputs/paper"))
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/paper/tables"))
-    parser.add_argument("--datasets", nargs="*", default=["hotpotqa", "2wiki", "musique", "popqa"])
+    parser.add_argument("--datasets", nargs="*", default=["hotpotqa", "2wiki", "musique", "nq"])
     args = parser.parse_args()
 
     baseline_rows: list[dict[str, Any]] = []

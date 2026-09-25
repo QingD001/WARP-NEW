@@ -1,4 +1,4 @@
-"""正式区域图检索协议。"""
+"""Regional-graph retrieval protocol."""
 
 from typing import Protocol
 
@@ -7,10 +7,10 @@ from .builder import RegionalGraph
 
 
 class GraphRetriever(Protocol):
-    """Advisor 与 pipeline 依赖的图检索协议。"""
+    """Graph-retrieval protocol used by the advisor and pipeline."""
 
     def search(self, query: str, graph: RegionalGraph, k: int = 10) -> list[SearchResult]:
-        """从一个已物化区域图检索 passage。"""
+        """Retrieve passages from one materialized regional graph."""
         ...
 
     def stats(self) -> dict[str, float | int]:

@@ -2,8 +2,8 @@
 # Not the paper 20% main table. Run with --max-folds 1 --skip-multistep.
 dataset:
   name: hotpotqa
-  corpus: /root/data/warp-g/data/processed/hotpotqa/corpus.jsonl
-  queries: /root/data/warp-g/data/processed/hotpotqa/queries.jsonl
+  corpus: data/processed/hotpotqa/corpus.jsonl
+  queries: data/processed/hotpotqa/queries.jsonl
 warp:
   retrieval_k: 10
   candidate_k: 50
@@ -33,9 +33,8 @@ warp:
   retrieval_ks: [2, 3, 5, 10]
   multistep_max_steps: 0
 graph:
-  artifact_root: /root/data/warp-g/outputs/indexes/hotpotqa
+  artifact_root: outputs/indexes/hotpotqa
   llm_name: deepseek-v4-flash
-  llm_base_url: https://yibuapi.com/v1
   disable_llm_thinking: true
   embedding_model_name: nvidia/NV-Embed-v2
   embedding_batch_size: 8

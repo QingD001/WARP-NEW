@@ -1,4 +1,4 @@
-"""从 YAML 运行完整论文实验并输出自描述 JSON artifact。"""
+"""Run a paper experiment from YAML and write a self-describing JSON artifact."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import argparse
 import copy
 import gc
 import hashlib
+import os
 import importlib.metadata
 import json
 import platform
@@ -100,7 +101,7 @@ def _attach_multistep(
     metrics: dict[str, Any], *, method: str, search_trace: Any, model: WARPG,
     queries: Any, log_dir: Path | None, documents: Any,
 ) -> dict[str, Any]:
-    """IRCoT 对照：不改写主路径 retrieved_doc_ids，问答仍用第一遍检索。"""
+    """IRCoT control: do not overwrite first-pass retrieved_doc_ids; QA uses that cache."""
     steps = int(model.config.multistep_max_steps)
     if steps <= 0:
         return metrics
@@ -174,6 +175,11 @@ def _build_model(
     graph_config = dict(config["graph"])
     graph_config["dataset"] = config["dataset"]["name"]
     graph_config["seed"] = design_seed
+    graph_config["llm_base_url"] = (
+        graph_config.get("llm_base_url")
+        or os.environ.get("OPENAI_BASE_URL")
+        or "https://api.openai.com/v1"
+    )
     builder = HippoRAG2GraphBuilder(HippoRAG2Config(**graph_config))
     graph_retriever = HippoRAG2GraphRetriever()
     dense = DenseRetriever(
@@ -928,9 +934,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", default="outputs/results.json", help="Result JSON path")
     parser.add_argument("--checkpoint-dir", type=Path, help="Resume completed folds; default: <output>.folds")
     parser.add_argument("--max-folds", type=int, default=None,
-                        help="Run only the first N cross-fitting folds; the yaml fold split is unchanged")
+                        help="Run only the first N evaluation splits")
     parser.add_argument("--skip-multistep", action="store_true",
-                        help="Disable the IRCoT对照; QA still uses the first-pass retrieval cache")
+                        help="Disable IRCoT; QA still uses the first-pass retrieval cache")
     return parser
 
 

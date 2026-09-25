@@ -1,4 +1,4 @@
-"""Region 特征、probe、收益预测与预算选择的公开接口。"""
+"""Public API for region features, probes, gain estimates, and selection."""
 
 from .features import RegionFeatureExtractor
 from .estimator import estimate_benefits

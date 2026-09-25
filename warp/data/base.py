@@ -1,7 +1,7 @@
-"""规范化 JSON/JSONL 数据加载器。
+"""Normalized JSON/JSONL loaders.
 
-本层只按固定规则生成交叉拟合 folds，不从 held-out test 反推任何设计信息；
-外部字段统一映射到共享 Document/Query 模型。
+Cross-fitting folds are produced by a fixed rule; held-out test never
+informs design. External fields map onto shared Document/Query models.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from warp.utils import read_json_records
 
 
 def _document(row: dict[str, Any], index: int) -> Document:
-    """兼容常见 passage 字段名，同时把未知字段保留在 metadata。"""
+    """Accept common passage field names; keep unknown keys in metadata."""
     doc_id = row.get("id", row.get("doc_id", row.get("_id", index)))
     title = row.get("title", "") or ""
     text = row.get("text", row.get("passage", row.get("contents", row.get("content", ""))))
@@ -26,7 +26,7 @@ def _document(row: dict[str, Any], index: int) -> Document:
 
 
 def _query(row: dict[str, Any], index: int) -> Query:
-    """规范化问题、证据 ID 和单/多答案格式。"""
+    """Normalize the question, evidence IDs, and single/multi-answer fields."""
     qid = row.get("id", row.get("query_id", row.get("question_id", row.get("_id", index))))
     text = row.get("query", row.get("question", row.get("text", "")))
     gold = row.get("gold_doc_ids", row.get("supporting_doc_ids", row.get("gold_docs", [])))
@@ -41,12 +41,12 @@ def _query(row: dict[str, Any], index: int) -> Query:
 
 
 def load_documents(path: str | Path) -> list[Document]:
-    """从 JSON 或 JSONL 加载共享 corpus。"""
+    """Load the shared corpus from JSON or JSONL."""
     return [_document(row, i) for i, row in enumerate(read_json_records(path))]
 
 
 def load_queries(path: str | Path) -> list[Query]:
-    """加载一个已经确定好的 query split。"""
+    """Load one already-fixed query split."""
     return [_query(row, i) for i, row in enumerate(read_json_records(path))]
 
 

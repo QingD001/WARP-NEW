@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""逐数据集、逐官方方法运行独立端到端对照实验。"""
+"""Run official LinearRAG end-to-end jobs per dataset."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ import sys
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run official LinearRAG and LightRAG suite")
+    parser = argparse.ArgumentParser(description="Run official LinearRAG suite")
     parser.add_argument("--config-dir", type=Path, default=Path("configs/paper"))
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/official"))
-    parser.add_argument("--datasets", nargs="*", default=["hotpotqa", "2wiki", "musique", "popqa"])
-    parser.add_argument("--methods", nargs="*", default=["linearrag", "lightrag"])
+    parser.add_argument("--datasets", nargs="*", default=["hotpotqa", "2wiki", "musique", "nq"])
+    parser.add_argument("--methods", nargs="*", default=["linearrag"])
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for dataset in args.datasets:

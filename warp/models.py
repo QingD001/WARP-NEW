@@ -1,8 +1,9 @@
-"""WARP-G 跨模块共享的数据模型。
+"""Shared WARP-G dataclasses.
 
-这些 dataclass 是各层之间的稳定边界：数据加载器只负责生成 Document/Query，
-检索器只交换 SearchResult，物理设计层通过 Region/RegionFeatures/ConstructionCost
-通信。保持这些对象简单，可以替换图后端而不改 advisor 和 evaluator。
+Loaders emit Document/Query, retrievers exchange SearchResult, and physical
+design talks via Region / RegionFeatures / ConstructionCost. Keep these
+objects simple so the graph backend can change without touching the advisor
+or evaluator.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from typing import Any
 
 @dataclass(slots=True)
 class Document:
-    """一个可检索 passage；`id` 是评测和后端映射使用的永久标识。"""
+    """A retrievable passage; `id` is the stable eval and backend key."""
     id: str
     text: str
     title: str = ""
@@ -21,13 +22,13 @@ class Document:
 
     @property
     def content(self) -> str:
-        """返回统一送入 lexical、dense 和 graph 后端的标题加正文。"""
+        """Title plus text, the payload sent to lexical, dense, and graph backends."""
         return f"{self.title}\n{self.text}".strip()
 
 
 @dataclass(slots=True)
 class Query:
-    """一条设计或评测问题，gold_doc_ids 保存完整证据 passage ID。"""
+    """A design or eval question; gold_doc_ids lists full evidence IDs."""
     id: str
     text: str
     gold_doc_ids: list[str] = field(default_factory=list)
@@ -37,7 +38,7 @@ class Query:
 
 @dataclass(slots=True)
 class SearchResult:
-    """统一的检索结果；source/region_id 用于追踪结果来自哪个物理结构。"""
+    """One ranked hit; source/region_id record which physical structure produced it."""
     doc_id: str
     score: float
     source: str
@@ -47,7 +48,7 @@ class SearchResult:
 
 @dataclass(slots=True)
 class Region:
-    """由共访问图社区发现得到的 passage ID 集合。"""
+    """A passage-ID set from co-access community detection."""
     id: str
     doc_ids: list[str]
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -55,7 +56,7 @@ class Region:
 
 @dataclass(slots=True)
 class DatasetBundle:
-    """共享 corpus 及严格分离的 train/design、dev、test query。"""
+    """Shared corpus plus strictly separated train/design, dev, and test queries."""
     documents: list[Document]
     train: list[Query]
     dev: list[Query] = field(default_factory=list)
@@ -64,7 +65,7 @@ class DatasetBundle:
 
 @dataclass(slots=True)
 class ConstructionCost:
-    """一次图构建的多维实测成本，不把时间等强行折成单一货币值。"""
+    """Measured multi-dimensional build cost; wall time is not converted to money."""
     input_tokens: int = 0
     output_tokens: int = 0
     embedding_tokens: int = 0
@@ -80,13 +81,13 @@ class ConstructionCost:
         return float(self.input_tokens + self.output_tokens + self.embedding_tokens)
 
     def to_dict(self) -> dict[str, Any]:
-        """转换为 JSON 可序列化字典。"""
+        """JSON-serializable dict."""
         return asdict(self)
 
 
 @dataclass(slots=True)
 class RegionFeatures:
-    """区域局部证据特征及整题上下文，用于探测优先级与诊断。"""
+    """Region-local evidence features plus query-level context."""
     region_id: str
     num_docs: float
     num_tokens: float
@@ -105,7 +106,7 @@ class RegionFeatures:
 
     @classmethod
     def names(cls) -> list[str]:
-        """返回 固定的特征列顺序。"""
+        """Fixed feature-column order."""
         return [
             "num_docs", "num_tokens", "query_freq", "base_recall",
             "failure_rate", "avg_retrieval_entropy", "multi_doc_rate",
@@ -115,9 +116,9 @@ class RegionFeatures:
         ]
 
     def vector(self) -> list[float]:
-        """按 `names()` 顺序生成模型输入向量。"""
+        """Feature vector in `names()` order."""
         return [float(getattr(self, name)) for name in self.names()]
 
     def to_dict(self) -> dict[str, Any]:
-        """输出带 region_id 的可审计特征字典。"""
+        """Auditable feature dict including region_id."""
         return asdict(self)

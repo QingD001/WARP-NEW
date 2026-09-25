@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""在独立 Python 进程中依次运行四个正式 benchmark 配置。
+"""Run paper benchmark configs in isolated processes.
 
-进程隔离可以释放上一个数据集的 GPU 模型/图内存，也让单数据集失败易于重跑。
+Process isolation releases GPU / graph memory after each dataset and makes a
+single-dataset failure easy to rerun.
 """
 
 from __future__ import annotations
@@ -13,13 +14,13 @@ from pathlib import Path
 
 
 def main() -> None:
-    """验证配置存在，并以失败即停的方式调用 `python -m warp.run`。"""
+    """Require each config to exist, then call `python -m warp.run` and stop on failure."""
     parser = argparse.ArgumentParser(description="Run all WARP-G paper configurations in isolated processes")
     parser.add_argument("--config-dir", type=Path, default=Path("configs/paper"))
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/paper"))
-    parser.add_argument("--datasets", nargs="*", default=["hotpotqa", "2wiki", "musique", "popqa"])
-    parser.add_argument("--max-folds", type=int, default=None,
-                        help="Forwarded to warp.run; yaml still defines the full fold split")
+    parser.add_argument("--datasets", nargs="*", default=["hotpotqa", "2wiki", "musique", "nq"])
+    parser.add_argument("--max-folds", type=int, default=1,
+                        help="Forwarded to warp.run (paper commands use 1)")
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for dataset in args.datasets:

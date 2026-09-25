@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把官方端到端 baseline artifacts 汇总为论文表格 CSV。"""
+"""Summarize official end-to-end baseline artifacts into a paper CSV."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Export official baseline summaries")
     parser.add_argument("--input-dir", type=Path, default=Path("outputs/official"))
     parser.add_argument("--output", type=Path, default=Path("outputs/paper/tables/official_end_to_end.csv"))
-    parser.add_argument("--datasets", nargs="*", default=["hotpotqa", "2wiki", "musique", "popqa"])
-    parser.add_argument("--methods", nargs="*", default=["linearrag", "lightrag"])
+    parser.add_argument("--datasets", nargs="*", default=["hotpotqa", "2wiki", "musique", "nq"])
+    parser.add_argument("--methods", nargs="*", default=["linearrag"])
     args = parser.parse_args()
     rows = []
     for dataset in args.datasets:

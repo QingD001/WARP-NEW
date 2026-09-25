@@ -1,4 +1,4 @@
-"""融合候选的正式 CrossEncoder 重排器。"""
+"""CrossEncoder reranker over fused candidates."""
 
 from __future__ import annotations
 
@@ -9,14 +9,14 @@ from warp.models import Document, SearchResult
 
 
 class Reranker(Protocol):
-    """Pipeline 依赖的候选重排接口。"""
+    """Candidate-rerank protocol used by the pipeline."""
 
     def rerank(self, query: str, candidates: list[SearchResult], k: int) -> list[SearchResult]:
         ...
 
 
 class CrossEncoderReranker:
-    """使用锁定 revision 的 sentence-transformers CrossEncoder 重排候选。"""
+    """sentence-transformers CrossEncoder with a pinned revision."""
 
     def __init__(self, documents: list[Document], model_name: str = "BAAI/bge-reranker-v2-m3",
                  batch_size: int = 32, max_length: int = 512, device: str | None = None,
@@ -34,7 +34,7 @@ class CrossEncoderReranker:
         )
 
     def rerank(self, query: str, candidates: list[SearchResult], k: int) -> list[SearchResult]:
-        """对 query-passage 对直接打分，并保留候选原来的 region 归属。"""
+        """Score query-passage pairs and keep each candidate region_id."""
         if not candidates:
             return []
         missing = [result.doc_id for result in candidates if result.doc_id not in self.documents]

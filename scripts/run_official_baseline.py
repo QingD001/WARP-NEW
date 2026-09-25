@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""在完整 1,000-query 数据上运行锁定的作者官方端到端系统。"""
+"""Run a pinned official end-to-end system on the full 1,000-query set."""
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 from collections import Counter
 from contextlib import contextmanager
 import hashlib
@@ -26,7 +25,7 @@ from warp.utils import write_json
 
 @contextmanager
 def official_import(repo: Path) -> Iterator[None]:
-    """临时把作者仓库置于导入路径首位，避免复制或重写其算法。"""
+    """Put the official repo first on sys.path so its algorithm is not copied or rewritten."""
     sys.path.insert(0, str(repo.resolve()))
     try:
         yield
@@ -161,54 +160,9 @@ def run_linearrag(
     return rows, build_seconds, query_seconds
 
 
-async def run_lightrag(
-    repo: Path, settings: dict[str, Any], documents: list[Any], queries: list[Any], index_dir: Path,
-) -> tuple[list[dict[str, Any]], float, float]:
-    # The imported upstream wrappers hard-code these models. Do not silently
-    # report a YAML model setting that was never applied to actual requests.
-    if settings["llm_model"] != "gpt-4o-mini" or settings["embedding_model"] != "text-embedding-3-small":
-        raise ValueError("This LightRAG adapter requires gpt-4o-mini and text-embedding-3-small")
-    with official_import(repo):
-        from lightrag import LightRAG, QueryParam
-        from lightrag.llm.openai import gpt_4o_mini_complete, openai_embed
-
-        rag = LightRAG(
-            working_dir=str(index_dir), embedding_func=openai_embed,
-            llm_model_func=gpt_4o_mini_complete,
-        )
-        await rag.initialize_storages()
-        try:
-            started = time.perf_counter()
-            await rag.ainsert(
-                [document.content for document in documents],
-                ids=[document.id for document in documents],
-                file_paths=[document.id for document in documents],
-            )
-            build_seconds = time.perf_counter() - started
-            param = QueryParam(
-                mode=settings["mode"], top_k=int(settings["top_k"]),
-                chunk_top_k=int(settings["chunk_top_k"]), enable_rerank=False,
-            )
-            started = time.perf_counter()
-            predictions = [str(await rag.aquery(query.text, param=param)) for query in queries]
-            query_seconds = time.perf_counter() - started
-        finally:
-            await rag.finalize_storages()
-    rows = [
-        {
-            "query_id": query.id,
-            "query": query.text,
-            "prediction": prediction,
-            "gold_answer": query.answer,
-        }
-        for query, prediction in zip(queries, predictions)
-    ]
-    return rows, build_seconds, query_seconds
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run an official end-to-end GraphRAG baseline")
-    parser.add_argument("--method", required=True, choices=["linearrag", "lightrag"])
+    parser.add_argument("--method", required=True, choices=["linearrag"])
     parser.add_argument("--config", type=Path, required=True, help="WARP-G dataset YAML")
     parser.add_argument("--manifest", type=Path, default=Path("configs/official_baselines.yaml"))
     parser.add_argument("--repo-root", type=Path, default=Path("external/official"))
@@ -234,14 +188,9 @@ def main() -> None:
     index_dir = args.index_root / args.method / dataset["name"] / fingerprint
     index_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.method == "linearrag":
-        rows, build_seconds, query_seconds = run_linearrag(
-            repo, manifest["linearrag"], documents, queries, index_dir,
-        )
-    else:
-        rows, build_seconds, query_seconds = asyncio.run(run_lightrag(
-            repo, manifest["lightrag"], documents, queries, index_dir,
-        ))
+    rows, build_seconds, query_seconds = run_linearrag(
+        repo, manifest["linearrag"], documents, queries, index_dir,
+    )
     result = {
         "run_metadata": {
             "method": args.method,

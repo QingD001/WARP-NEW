@@ -1,4 +1,4 @@
-"""在构图前计算区域局部证据特征，并单独保留整题上下文。"""
+"""Cheap region features before graph construction, plus query-level context."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from warp.utils import cosine, tokenize
 
 
 class RegionFeatureExtractor:
-    """只依赖 corpus、train query、基础检索和便宜共访问图。"""
+    """Uses only the corpus, train queries, base retrieval, and the co-access graph."""
     def __init__(self, routing_k: int = 20, candidate_k: int = 50,
                  dispersion_pairs: int = 4096, seed: int = 42) -> None:
         if candidate_k < routing_k:
@@ -32,13 +32,13 @@ class RegionFeatureExtractor:
         retriever: HybridRetriever,
         coaccess: CoaccessGraph,
     ) -> tuple[dict[str, RegionFeatures], dict[str, list[str]], dict[str, list[SearchResult]]]:
-        """返回特征、region-query 路由关系和可复用的 base results。"""
+        """Return features, region-query routing, and reusable base results."""
         doc_map = {doc.id: doc for doc in documents}
         doc_region = {doc_id: region.id for region in regions for doc_id in region.doc_ids}
         query_results: dict[str, list[SearchResult]] = {
             query.id: retriever.search(query.text, self.candidate_k) for query in queries
         }
-        # 一个 query 可访问多个 region，但在同一区域只计一次 query_freq。
+        # One query may touch many regions; query_freq counts it once per region.
         region_queries: dict[str, list[str]] = defaultdict(list)
         for query in queries:
             seen: set[str] = set()
@@ -81,7 +81,7 @@ class RegionFeatureExtractor:
                 if region_gold:
                     multi_docs.append(float(len(region_gold) > 1))
 
-            # dispersion 与 density 分别刻画语义异质性和真实 workload 内聚性。
+            # Dispersion is semantic spread; density is workload cohesion.
             pair_count = len(region.doc_ids) * (len(region.doc_ids) - 1) // 2
             if pair_count <= self.dispersion_pairs:
                 all_pairs = list(combinations(region.doc_ids, 2))

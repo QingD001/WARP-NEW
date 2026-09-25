@@ -1,4 +1,4 @@
-"""所有基础检索器遵循的最小结构化接口。"""
+"""Minimal protocol shared by all base retrievers."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ from warp.models import Document, SearchResult
 
 
 class Retriever(Protocol):
-    """支持全语料检索和 `doc_ids` 限定区域检索的协议。"""
+    """Full-corpus search or a `doc_ids` subset."""
     def fit(self, documents: list[Document]) -> "Retriever":
-        """在共享 corpus 上构建索引。"""
+        """Build an index on the shared corpus."""
         ...
 
     def search(self, query: str, k: int = 10, doc_ids: set[str] | None = None) -> list[SearchResult]:
-        """检索全 corpus 或 doc_ids 指定的子集。"""
+        """Search the full corpus or a doc_ids subset."""
         ...

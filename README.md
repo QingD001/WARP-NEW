@@ -1,411 +1,87 @@
 # WARP-G
 
-WARP-G 是一个面向科研实验的 workload-aware regional graph materialization 系统。它在共享语料上先建立
-BM25 + NV-Embed-v2 基础检索，再根据训练 workload 把文档划分为 regions，在独立探测构图 proxy 内实测
-region 的构图收益，再按方法自身规则选出要物化的区域图。部署阶段不再施加 token 预算截断；主表比较各方法
-完整 pipeline 的检索质量与实际消耗 tokens。区域选择对照对齐 WARP 选出的区域个数，而不是同一 token 预算。
+WARP-G is a workload-aware regional graph materialization system for GraphRAG.
+There is no separate training loop. Physical design (partition, probe, region
+selection) and held-out evaluation both run inside `python -m warp.run`.
 
-正式实验固定使用 `seed=42`。主表比较 KET-RAG、G2ConS、Random-region、Frequency-only、Gain-only、
-Cost-only 和 WARP-G；BM25、Dense、Hybrid、HippoRAG2 graph-only 和 Base + Full Graph 作为标准参考方法。
-LinearRAG 与 LightRAG 使用锁定的作者官方实现运行独立端到端对照。详细研究假设与评测口径见
-[design.md](design.md)，所有已讨论工作的介绍、差异和官方代码状态见 [related_work.md](related_work.md)。
+This repository is intended as anonymous supplementary code. It does **not**
+bundle processed corpora, HippoRAG indexes, LLM caches, or paper result JSON.
 
-## 执行流程
+Paper datasets: **HotpotQA, 2Wiki, MuSiQue, NQ**.
 
-```text
-HippoRAG2 corpus + 1,000 released queries
-            │
-            ▼
-deterministic 5-fold cross-fitting
-            │
-            ▼
-BM25 + Dense + RRF 基础索引
-            │
-            ▼
-train-query coaccess graph + semantic kNN
-            │
-            ▼
-Leiden region partition
-            │
-            ▼
-cheap region features + budgeted graph probes
-            │
-            ▼
-measured / conditional region selection (no deployment-token cutoff)
-            │
-            ▼
-full-pipeline regional materialization
-            │
-            ├── WARP-G 与四个个数对齐的 region-selector ablations
-            ├── KET-RAG / G2ConS 原生 core 比例对照
-            └── retrieval、reader、实际 tokens、significance artifacts
-```
+## What the paper runner does
 
-## 项目结构
+On a shared corpus the runner:
+
+1. builds BM25 + NV-Embed-v2 + RRF base retrieval;
+2. partitions documents from the design-query workload (`seed=42`);
+3. probes a subset of regions with the same HippoRAG2 retrieval path used at
+   deployment;
+4. selects regions with WARP-G or a control rule (no deployment-token cutoff);
+5. evaluates BM25 / Dense / Hybrid, HippoRAG2 graph-only, Base + Full Graph,
+   KET-RAG, G2ConS, and the four region-selection methods;
+6. writes retrieval metrics, a shared-cache reader, IRCoT, and token costs.
+
+LinearRAG is a separate official end-to-end run. It is not a row in the WARP
+region-selection table.
+
+## Repository layout
 
 ```text
-WARP-G/
-├── configs/paper/          四个数据集的正式实验配置
-├── scripts/                数据准备、整套实验执行和结果导出脚本
-├── warp/
-│   ├── advisor/            特征、probe、收益估计和区域选择
-│   ├── baselines/          KET-RAG 与 G2ConS
-│   ├── data/               数据 schema 适配与加载
-│   ├── eval/               检索、reader、统计和成本评测
-│   ├── graph/              官方 HippoRAG2 构图与检索适配
-│   ├── partition/          共访问图和 Leiden 分区
-│   └── retrieval/          BM25、Dense、ANN、RRF 和 CrossEncoder
-├── design.md               论文研究设计与实验口径
-├── related_work.md         相关工作、差异与官方代码状态
-└── pyproject.toml          安装依赖、包信息和命令入口
+configs/paper/              main-table YAML
+configs/ablations/          optional method / probe-fraction YAML
+configs/official_baselines.yaml
+scripts/prepare_hipporag2.py
+scripts/run_paper_suite.py
+scripts/export_paper_results.py
+scripts/prepare_official_baselines.py
+scripts/run_official_baseline.py
+scripts/run_official_suite.py
+scripts/export_official_results.py
+warp/run.py                 paper experiment entry (`warp-g`)
+tests/                      unit tests that do not call the paper LLM
 ```
 
-## 每个 Python 文件的职责
-
-### 顶层核心文件
-
-#### `warp/__init__.py`
-
-包的最外层公开接口。声明当前版本，并直接导出 `Document`、`Query`、`Region` 和 `SearchResult`，让其他代码
-不必了解这些数据模型具体放在哪个模块。
-
-#### `warp/models.py`
-
-定义整个项目跨模块传递的数据结构：
-
-- `Document`：稳定文档 ID、标题、正文和 metadata；`content` 统一生成标题加正文。
-- `Query`：问题、gold evidence IDs、答案和 metadata。
-- `SearchResult`：统一检索结果，包括文档 ID、分数、来源、排名和 region ID。
-- `Region`：一组被共同物化的文档。
-- `DatasetBundle`：共享 corpus 和当前折严格分离的 design/test queries。
-- `ConstructionCost`：LLM tokens、embedding tokens、耗时、图规模、存储和美元成本。
-- `RegionFeatures`：区域局部及全局上下文的十四维构图前特征。
-
-这是其他模块共同依赖的 schema 层，不执行检索或实验。
-
-#### `warp/pipeline.py`
-
-WARP-G 的核心编排器。`WARPConfig` 定义检索深度、probe 比例、partition 模式和固定 seed；`WARPG` 串联完整
-设计与部署流程：
-
-1. 拟合 Base 检索器；
-2. 从 train workload 构建共访问图并进行 Leiden 分区；
-3. 提取区域特征并执行 graph probes；
-4. 对实测收益做零先验收缩；未探测区域不外推；
-5. 按方法自身规则选择并物化 regions（无部署 token 截断；条件模式下 control 对齐 WARP 实际选区个数）；
-6. 执行 Base、WARP-G、Full Graph 和 graph-only 检索，并另开 IRCoT 对照；
-7. 输出 routing、probe、选区与成本审计信息。
-
-test queries 只会进入评测和 routing diagnostics，不参与分区、特征、probe 或 收益估计。
-
-#### `warp/run.py`
-
-正式论文实验入口，也是 `warp-g` 命令实际调用的文件。它负责：
-
-- 读取并验证 YAML；
-- 固定 `seed=42` 创建 WARP-G、HippoRAG2、Base 和 CrossEncoder；
-- 每个方法只跑一轮完整 pipeline：KET-RAG、G2ConS、四个 region-selection controls 和 WARP-G；
-- 运行 BM25、Dense、Hybrid、HippoRAG2 和 Full Graph 参考实验；
-- 执行 partition ablation 和固定 reader evaluation（复用该轮检索结果，不再按预算另选）；
-- 记录 deployment、design-search、first-run、online 的实际 tokens 与 token efficiency；
-- 完整执行五个 800/200 folds，并合并全部 1,000 条 held-out query；
-- 计算 query-level bootstrap CI、paired randomization 和 Holm correction；
-  `actual_cost_fraction` 相对 Full Graph 仅作描述，不再扫多档预算画 AUC 主表；
-- 保存数据哈希、包版本、CUDA、GPU 和 HippoRAG commit 等复现元数据；
-- 最终写出一个自描述 JSON artifact。
-
-#### `warp/utils.py`
-
-无状态通用工具集合：文本 tokenization、稳定字符串哈希、cosine、min-max normalization、JSON/JSONL 读取、
-JSON 写入和固定大小 batching。它不包含实验策略。
-
-### `warp/retrieval/`：基础检索与统一排序
-
-#### `warp/retrieval/__init__.py`
-
-检索子包的公开出口，集中导出 BM25、Dense、Hybrid、CrossEncoder、RRF 和统一融合函数。
-
-#### `warp/retrieval/base.py`
-
-定义 `Retriever` Protocol，约束所有基础检索器必须提供 `fit(documents)` 和
-`search(query, k, doc_ids)`。它只描述接口，不包含具体算法。
-
-#### `warp/retrieval/bm25.py`
-
-实现 corpus-level BM25。`fit` 计算文档长度、词频、文档频率和 IDF；`search` 支持全语料搜索以及显式
-`doc_ids` 子集搜索，返回统一 `SearchResult`。
-
-#### `warp/retrieval/dense.py`
-
-封装 HippoRAG 共享 passage encoder 的 Dense Retriever。它批量生成并缓存文档向量，提供文档向量查找和
-cosine dense retrieval，同时向 partition/features/baselines 暴露一致的 embedding 空间。
-
-#### `warp/retrieval/ann.py`
-
-使用 FAISS HNSW 构建 cosine ANN index，为每个文档返回 top-k semantic neighbors。该文件用于替代全量
-两两相似度矩阵，主要服务于共访问图补边和 KET-RAG semantic KNN。
-
-#### `warp/retrieval/hybrid.py`
-
-实现共享排序路径：
-
-- `reciprocal_rank_fusion`：按 rank 融合 BM25、Dense 和图检索结果，并支持不同通路权重。
-- `HybridRetriever`：BM25 + Dense 的全语料 Base。
-- `fuse_and_rerank`：先生成统一候选，再交给 CrossEncoder，供 Base、probe、WARP-G 和所有 baseline 共用。
-
-#### `warp/retrieval/reranker.py`
-
-定义 `Reranker` Protocol，并实现固定 revision 的 `CrossEncoderReranker`。它把 query 与候选文档内容送入
-BGE CrossEncoder，按照模型分数产生最终 top-k。
-
-### `warp/partition/`：workload-aware region 划分
-
-#### `warp/partition/__init__.py`
-
-导出 `CoaccessGraph`、`CoaccessGraphBuilder` 和 `RegionPartitioner`。
-
-#### `warp/partition/coaccess_graph.py`
-
-用 train queries 构建文档共访问图。每个 query 的 Base top-k 文档两两形成 query coaccess edges；FAISS
-semantic neighbors 形成低权重语义边。输出同时保存总边、两种来源的边和每题 Base 结果，供后续特征提取
-与消融复用。
-
-#### `warp/partition/leiden.py`
-
-把 `CoaccessGraph` 转换为 igraph，并调用 Leiden community detection 得到 regions。小于
-`min_region_size` 的社区按照与其他社区的边权进行合并，最终生成稳定编号的 `Region` 对象。
-
-### `warp/advisor/`：区域收益建模与选择
-
-#### `warp/advisor/__init__.py`
-
-导出区域特征、probe、收益估计和区域选择的公开类。
-
-#### `warp/advisor/features.py`
-
-`RegionFeatureExtractor` 在真正构图前计算九维 cheap features：文档数、token 数、query frequency、Base
-recall、failure rate、retrieval entropy、multi-document rate、embedding dispersion 和 coaccess density。
-它还建立 region-query routing 关系，并缓存 probe 使用的 Base candidates。
-
-#### `warp/advisor/probe.py`
-
-定义 `EvidenceRecall` 与 `CompleteEvidence` probe utility、`ProbeOutcome` 和 `RegionProber`。它对 workload
-覆盖区域按局部缺失证据/成本排序并穿插随机探索，实际构建少量 HippoRAG2 regional graphs，并使用与正式部署完全相同的 RRF +
-CrossEncoder 路径测量每个 region 相对 Base 的真实增益。
-
-#### `warp/advisor/estimator.py`
-
-直接使用成对检索的实测净增益，以 `n / (n + gain_prior_queries)` 向零收缩。
-未探测区域不外推，报告标记为 `unprobed`；独立选区与 Gain-only 只选择单区已测正收益区域。
-默认 WARP 使用条件选区，允许单区零收益但联合有收益的区域组合。
-探测按 `probe_fraction` 抽样实测，每区最多 64 个设计问题，不再用构图 token proxy 卡探测。
-
-#### `warp/advisor/selector.py`
-
-独立选区模式在相同 regions 上只替换排序公式。WARP 按
-
-```text
-query_frequency × max(estimated_gain, 0)
-```
-
-选出 `score>0` 的区域后自然结束，不再用 token proxy 做背包截断。Random-region、Frequency-only 与 Gain-only
-取与 WARP 相同的区域个数，分别对照随机、频率与收益规则。
-
-#### `warp/advisor/conditional.py` 与 `warp/retrieval/multistep.py`
-
-默认 paper 配置采用 ER/CE 混合收益、条件边际收益选区（带有限双区试探）和两步证据反馈检索。
-条件收益用同一批 train/design 问题测量，不重复乘区域频率。Base、区域图、全图及内置全局对照
-均使用相同的多步包装；原始查询始终用于累计候选的最终重排。这是 passage feedback，不是 IRCoT。
-IRCoT 是另一条对照：主路径检索与 QA 仍用第一遍结果；`multistep_max_steps` 另开「检索 → LLM 扩展 query → 再检索」，
-逐步 JSONL 落盘，不覆盖 `retrieved_doc_ids`。正式检索指标统一报告 Evidence Recall / Complete Evidence
-**@2 / @3 / @5 / @10**。逐步证据变化在检索后计算并保存，不进入检索决策。详见
-[三项方法改进与消融说明](method_extensions_2026-09-10.md)。
-
-### `warp/graph/`：HippoRAG2 后端
-
-#### `warp/graph/__init__.py`
-
-集中导出图抽象接口和官方 HippoRAG2 builder/retriever。
-
-#### `warp/graph/builder.py`
-
-定义 `RegionalGraph`，保存 region、artifact 路径、实测构建成本、后端实例和 metadata；同时定义
-`GraphBuilder` Protocol，要求图后端实现预构建成本估计、区域构图和 corpus-wide Full Graph 构建。
-
-#### `warp/graph/retriever.py`
-
-定义 `GraphRetriever` Protocol，统一图搜索、在线统计快照和增量成本接口，使 pipeline 不依赖某个具体图
-检索实现。
-
-#### `warp/graph/hipporag2.py`
-
-官方 HippoRAG2 的严格适配层，是图相关代码的主体：
-
-- `HippoRAG2Config` 映射固定的 LLM、embedding、PPR、synonymy 和价格参数；
-- 校验安装的 HippoRAG API/version 是否与锁定 commit 一致；
-- 把每个 region 映射为隔离的官方 HippoRAG index；
-- 使用稳定 `source_id` 将官方 chunk 结果映射回 WARP 文档 ID；
-- 共享 LLM/embedding 模型权重，但隔离 region artifacts；
-- 统计逻辑/物理 LLM tokens、embedding tokens、时间、图规模、存储和估算 USD；
-- `HippoRAG2GraphRetriever` 执行正式图检索并测量每个实验单元的在线成本；
-- `_HippoRAGPassageEncoder` 将官方 embedding backend 适配为 Dense Retriever 所需接口。
-
-该文件不重新实现 HippoRAG 图算法，区域图与 Full Graph 都调用锁定版本的官方后端。
-
-### `warp/baselines/`：公开论文 baseline
-
-#### `warp/baselines/__init__.py`
-
-导出 `GlobalBaselineFactory` 和 `GlobalGraphBaseline`。
-
-#### `warp/baselines/global_graph.py`
-
-实现两个 corpus-level 论文 baseline：
-
-- KET-RAG：lexical/semantic KNN、chunk PageRank、core chunk selection、keyword bipartite retrieval 和
-  HippoRAG2 core KG。
-- G2ConS：sentence-level concept embeddings、semantic-filtered co-occurrence、Dice edge weights、concept
-  PageRank、core chunk selection、concept graph expansion 和 HippoRAG2 core KG。
-
-`LightweightGraphIndex` 使用 FAISS 检索 query concepts 并沿轻量图扩展到文档；`GlobalBaselineFactory` 按各自
-论文的文档比例（默认 0.8）选取 core 并构建 HippoRAG2 骨架图，不再套用 WARP 的 token 预算。
-`GlobalGraphBaseline` 将 Base、轻量结构和 graph results 按固定权重 RRF，最后进入共享 CrossEncoder。
-轻量 embedding、构图耗时、节点、边和存储全部计入 deployment cost。
-
-### `warp/data/`：数据加载
-
-#### `warp/data/__init__.py`
-
-公开通用 split loader 和正式实验使用的 deterministic cross-fitting loader。
-
-#### `warp/data/base.py`
-
-规范化 JSON/JSONL 数据加载器。它将常见文档和 query 字段映射为 `Document`/`Query`，保留未知 metadata，
-并按 `sha256(seed:query_id)` 的稳定顺序生成五个 design/test folds。
-
-#### `warp/data/benchmarks.py`
-
-HotpotQA、2WikiMultiHopQA、MuSiQue 和 PopQA 的 schema 适配层。它提取不同格式中的 supporting evidence
-IDs 和答案，强制每个 split 使用同一共享 corpus，并返回统一 `DatasetBundle`。
-
-### `warp/eval/`：评测、统计与成本
-
-#### `warp/eval/__init__.py`
-
-导出成本聚合、检索评测、答案指标和 reader evaluation 公共函数。
-
-#### `warp/eval/construction_cost.py`
-
-逐维累加多个 `ConstructionCost`。token、时间、图规模、存储和美元成本分别求和，不把异质单位压缩成一个
-不可解释的分数。
-
-#### `warp/eval/cutoffs.py`
-
-固定正式截断 `RETRIEVAL_KS = (2, 3, 5, 10)` 和 Reader `top_k=5`，避免主表与 IRCoT 对照各写一套 k。
-
-#### `warp/eval/retrieval.py`
-
-计算每题和整体的 `Evidence Recall@2/3/5/10`、`Complete Evidence@2/3/5/10`，保存 per-query metrics、
-`retrieved_doc_ids` 和 `ranked_results`，并对每个指标执行 paired bootstrap 95% confidence interval。
-
-#### `warp/eval/multistep.py`
-
-IRCoT 对照：每步检索、LLM 生成下一步 query 或 END，累计去重排序，并把每条 query 的逐步轨迹写成 JSONL。
-检索决策不读 gold；gold 只用于事后逐步 Recall/CE。这与 `warp/retrieval/multistep.py` 的 passage-feedback 不是同一协议。
-
-#### `warp/eval/statistics.py`
-
-实现论文使用的统计量：均值、paired bootstrap interval、paired randomization p-value，以及通用的
-MAE、RMSE 和带并列排名处理的 Spearman correlation。
-
-#### `warp/eval/qa.py`
-
-实现答案 normalization、Exact Match 和 token-level F1，用于统一计算生成式 reader 的答案质量。
-
-#### `warp/eval/reader.py`
-
-把任意检索方法返回的 evidence 送入同一个官方 HippoRAG2 QA prompt/LLM，保证比较时只改变检索证据，不改变
-reader。输出 Answer EM/F1、每题 prediction 和 reader token usage。
-
-### `scripts/`：实验脚本
-
-#### `scripts/prepare_benchmark.py`
-
-通用的显式 split 转换工具；四个正式 HippoRAG2 配置不调用它，而是使用 `prepare_hipporag2.py` 生成完整
-query set 并由 runner 做五折交叉拟合。
-
-#### `scripts/run_paper_suite.py`
-
-依次启动 HotpotQA、2Wiki、MuSiQue 和 PopQA 四份正式配置。每个数据集使用独立 Python 进程，便于上一份
-数据集结束后释放 GPU 模型与图内存；任意进程失败都会直接终止整套运行。
-
-#### `scripts/export_paper_results.py`
-
-读取四个正式 JSON artifacts，将嵌套结果展开成论文绘图和制表使用的 tidy CSV：baseline、quality trials/summary、
-实际 tokens / token efficiency、partition ablation、reader 和 Holm-corrected paired significance。
-JSON 仍可能带有 `quality_cost_auc` 字段，但单点 pipeline 下 AUC 为占位，不是主结论。
-
-#### `scripts/prepare_official_baselines.py`
-
-按 `configs/official_baselines.yaml` 下载 LinearRAG 与 LightRAG 作者仓库，并检出实验锁定 commit；不修改官方算法。
-
-#### `scripts/run_official_baseline.py` 与 `scripts/run_official_suite.py`
-
-把当前完整 corpus 和 1,000 条 queries 送入锁定的作者官方 API，分别或成套运行独立 end-to-end 对照，记录输入哈希、
-官方 commit、构建/查询 wall time、逐题答案和 EM/F1。它们不混入同后端区域选择与实际 token 主表。
-
-#### `scripts/export_official_results.py`
-
-把八份 LinearRAG/LightRAG 官方实验 artifact 汇总为 `official_end_to_end.csv`。
-
-## 配置文件
-
-`configs/paper/` 包含四份正式配置：
-
-- `hotpotqa.yaml`
-- `2wiki.yaml`
-- `musique.yaml`
-- `popqa.yaml`
-
-每份配置显式指定 corpus/query set、五折交叉拟合、WARP 参数、HippoRAG2 参数、固定模型 revision、
-KET/G2 core 比例、`seed=42`、partition ablation 和 reader methods。没有部署预算列表；代码不会在正式运行时
-自动搜索或改变这些参数。
-
-## 安装
-
-需要 Python 3.10+、CUDA、兼容 OpenAI SDK 的 LLM API 凭证和 Hugging Face 模型访问权限：
+## Environment
+
+Needs Python 3.10+, a CUDA GPU (the paper runner refuses CPU-only execution),
+Hugging Face access for the embedding/reranker weights, and an
+OpenAI-compatible LLM endpoint.
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e .
-export OPENAI_API_KEY=<your-key>
-export HF_HOME=<huggingface-cache-directory>
+export OPENAI_API_KEY=YOUR_KEY
+export OPENAI_BASE_URL=https://api.openai.com/v1   # or any compatible gateway
+export HF_HOME=$PWD/.hf-cache
 export CUDA_VISIBLE_DEVICES=0
 ```
 
-正式后端为：
+Pinned backends in the paper YAML:
 
-- graph/dense：`nvidia/NV-Embed-v2`；
-- OpenIE/reader：`deepseek-v4-flash`（`https://yibuapi.com/v1`，关闭 thinking）；
-- reranker：固定 revision 的 `BAAI/bge-reranker-v2-m3`；
-- graph implementation：锁定 commit `c617143f01477243992a63b2e2151cc003dd3b21` 的 HippoRAG2。
+| Role | Setting in this repo |
+|---|---|
+| Graph / dense encoder | `nvidia/NV-Embed-v2` |
+| OpenIE + reader LLM | `deepseek-v4-flash`, thinking disabled |
+| Reranker | `BAAI/bge-reranker-v2-m3` @ `b5160aeac3c6c8fe7beaaaf04c9e0142826b58d1` |
+| Graph implementation | HippoRAG 2.0.0a4, commit `c617143f01477243992a63b2e2151cc003dd3b21` |
+| Seeds | `warp.seed: 42`, `experiment.seed: 42` |
+| Retrieval cutoffs | Evidence Recall / Complete Evidence @2/3/5/10 |
+| Reader | top-5, 3 repeats, shared retrieval cache |
 
-## 数据格式
+`pip install -e .` pulls HippoRAG from the pinned Git commit in
+`pyproject.toml`. A GPU is required for NV-Embed-v2 and the reranker. LLM
+OpenIE and QA need a paid or self-hosted endpoint. This packaging pass did
+**not** re-run the paper suite, so wall-clock and dollar cost are not restated
+here.
 
-Corpus JSONL：
+Set `OPENAI_BASE_URL` to the same OpenAI-compatible service used in your
+experiment. The YAML does not embed a lab-specific gateway.
 
-```json
-{"id":"doc-1","title":"Title","text":"Passage text"}
-```
+## Data
 
-Query JSONL：
-
-```json
-{"id":"q-1","query":"Question?","gold_doc_ids":["doc-1","doc-2"],"answer":["alias"]}
-```
-
-### 使用 HippoRAG2 官方发布数据
-
-HippoRAG2 发布了本项目四个 benchmark 的 corpus/query pairs。下载固定 revision 后运行转换脚本：
+### HippoRAG2 release (HotpotQA, 2Wiki, MuSiQue)
 
 ```bash
 python3 -m pip install -U huggingface_hub
@@ -414,40 +90,155 @@ hf download osunlp/HippoRAG_2 \
   hotpotqa.json hotpotqa_corpus.json \
   2wikimultihopqa.json 2wikimultihopqa_corpus.json \
   musique.json musique_corpus.json \
-  popqa.json popqa_corpus.json \
   --repo-type dataset \
   --revision 5ec05b38deecc3318bb432c69865959c56058990 \
   --local-dir data/raw/hipporag2
 
-python3 scripts/prepare_hipporag2.py
+python3 scripts/prepare_hipporag2.py --datasets hotpotqa 2wiki musique
 ```
 
-转换器会生成配置文件已经指向的 `data/processed/{hotpotqa,2wiki,musique,popqa}`，为重复标题/内容建立稳定
-passage ID，验证所有 gold evidence，并写入 `queries.jsonl` 与 `split_manifest.json`。正式 runner 使用固定
-`seed=42` 的五折交叉拟合：每折 800 条 query 只用于 physical design，另 200 条只用于 held-out evaluation；
-五折合并后，HippoRAG2 发布的 1,000 条 query 每条恰好被测试一次。
+The converter writes `data/processed/{hotpotqa,2wiki,musique}/` with
+`corpus.jsonl`, `queries.jsonl`, and `split_manifest.json`. Passage IDs are
+`doc-` plus a hash of title and text. Every gold evidence passage must exist
+in the shared corpus.
 
-## 运行正式实验
+Raw HippoRAG2 JSON and the processed JSONL are **not** shipped. Hugging Face
+gated weights and the HippoRAG2 dataset license still apply.
 
-运行全部数据集：
+### Natural Questions
+
+`configs/paper/nq.yaml` is a paper config, but `scripts/prepare_hipporag2.py`
+does not convert NQ. There is no in-repo download or schema adapter. Place
+`data/processed/nq/corpus.jsonl` and `data/processed/nq/queries.jsonl` in the
+schema below before running NQ.
+
+### Expected JSONL schema
+
+Corpus:
+
+```json
+{"id":"doc-1","title":"Title","text":"Passage text"}
+```
+
+Queries:
+
+```json
+{"id":"q-1","query":"Question?","gold_doc_ids":["doc-1","doc-2"],"answer":["alias"]}
+```
+
+## Main experiments
+
+There is no checkpointed model to load. Design artifacts are HippoRAG indexes
+under `outputs/indexes/<dataset>/`. Documented paper commands use
+`--max-folds 1`.
+
+Single dataset (unverified end-to-end; needs data, GPU, and LLM):
+
+```bash
+python3 -m warp.run \
+  --config configs/paper/hotpotqa.yaml \
+  --output outputs/paper/hotpotqa.json \
+  --max-folds 1
+```
+
+All four paper datasets:
 
 ```bash
 python3 scripts/run_paper_suite.py
 ```
 
-运行单个数据集：
+Useful flags (verified via `--help` only):
 
 ```bash
-python3 -m warp.run \
-  --config configs/paper/hotpotqa.yaml \
-  --output outputs/paper/hotpotqa.json
+python3 -m warp.run --help
+# --max-folds 1     paper reproduction command used in this README
+# --skip-multistep  keep first-pass QA; skip the IRCoT protocol
+# --checkpoint-dir  default is <output>.folds
 ```
 
-导出论文 CSV：
+Export tidy CSV from completed JSON (unverified without result files):
 
 ```bash
-python3 scripts/export_paper_results.py
+python3 scripts/export_paper_results.py \
+  --input-dir outputs/paper \
+  --output-dir outputs/paper/tables
 ```
 
-正式运行会构建真实 HippoRAG2 indexes、调用配置中的 LLM、加载 GPU embedding/reranker，并执行完整 reader
-evaluation，因此需要提前准备数据、模型权限、CUDA 环境和 API 凭证。
+### Command / config map
+
+| Artifact | Command | Config |
+|---|---|---|
+| Main retrieval / reader / cost table | `python -m warp.run --config configs/paper/<ds>.yaml --max-folds 1` | `configs/paper/{hotpotqa,2wiki,musique,nq}.yaml` |
+| Four-dataset suite | `python3 scripts/run_paper_suite.py` | same four YAML files |
+| Partition ablations | included in the paper YAML (`partition_ablations.modes`) | query / semantic / random |
+| Probe-fraction 40% (WARP + controls only) | `python -m warp.run --config configs/ablations/<ds>/probe40-warp.yaml --max-folds 1 --skip-multistep` | NQ and HotpotQA |
+| LinearRAG | `python3 scripts/prepare_official_baselines.py` then `python3 scripts/run_official_suite.py` | `configs/official_baselines.yaml` |
+| Official EM/F1 CSV | `python3 scripts/export_official_results.py` | `outputs/official/` |
+
+### Output files and metrics
+
+`outputs/paper/<dataset>.json` is self-describing. Important sections:
+
+| Section | Contents |
+|---|---|
+| `run_metadata` | config snapshot, data SHA-256, package versions, CUDA, HippoRAG commit |
+| `baselines` / `baseline_trials` | BM25, Dense, Hybrid, HippoRAG2, Full Graph |
+| `quality_cost_curve` / `quality_cost_summary` | WARP and graph methods, with costs |
+| `paired_significance` | WARP vs each reference, Holm-adjusted paired randomization |
+| `partition_ablations` | query / semantic / random partitions |
+| `reader_evaluation` | Answer EM / F1 on the shared top-5 cache |
+
+Retrieval metrics: **Evidence Recall** and **Complete Evidence** at k in
+{2, 3, 5, 10}, with query-level paired bootstrap 95% CIs. Tokens are
+`input + output + embedding`. `actual_cost_fraction` is deployed tokens
+divided by the Full Graph construction tokens. IRCoT is stored under
+`multistep` and does not overwrite first-pass `retrieved_doc_ids`.
+
+CSV export writes `outputs/paper/tables/{baselines,quality_cost_trials,quality_cost_summary,reader,paired_significance,quality_cost_auc,partition_ablations}.csv`.
+With a single full-pipeline point, `quality_cost_auc` is a placeholder, not a
+main-table curve.
+
+## Official LinearRAG
+
+```bash
+python3 scripts/prepare_official_baselines.py
+# clones into external/official/linearrag at the pinned commit
+python3 scripts/run_official_suite.py
+python3 scripts/export_official_results.py
+```
+
+The pinned commit is in `configs/official_baselines.yaml`. LinearRAG uses the
+same `deepseek-v4-flash` paper LLM and no generation token cap. It is an
+official end-to-end API, not a WARP region-selection row.
+
+## Smoke checks (no paper LLM, no full run)
+
+```bash
+python3 -m warp.run --help
+python3 scripts/prepare_hipporag2.py --help
+python3 -c "import warp, warp.run, warp.pipeline"
+python3 -m unittest discover -s tests -v
+```
+
+Those commands check the CLI surface and local unit tests. They do **not**
+reproduce paper numbers.
+
+## Anonymous supplement
+
+When you zip this code for submission, include source, configs, tests, and
+this README. Do **not** include:
+
+- `.git/` (commit metadata is identifying)
+- `data/` or `outputs/`, including local-path symlinks
+- `HippoRAG/`, `external/`, `vendor/`, `.venv/`, `.hf-cache/`
+- API keys, `.env`, logs, or machine-specific check files
+
+Do not publish this tree or change remotes as part of packaging.
+
+## What this pass does not claim
+
+- No paper table was regenerated here.
+- Full `warp.run` jobs were not executed (GPU + LLM + multi-hour OpenIE).
+- NQ preprocessing is not specified in-repo.
+- Exact GPU model and wall-clock hours are not recorded in the tracked
+  configs, so they are omitted.

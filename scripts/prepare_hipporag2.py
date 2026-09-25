@@ -20,7 +20,6 @@ DATASETS = {
     "hotpotqa": ("hotpotqa", "hotpotqa"),
     "2wiki": ("2wikimultihopqa", "2wiki"),
     "musique": ("musique", "musique"),
-    "popqa": ("popqa", "popqa"),
 }
 SPACE_RE = re.compile(r"\s+")
 
@@ -123,9 +122,9 @@ def _normalize_dataset(
         doc_id = _document_id(title, text)
         content = f"{title}\n{text}".strip()
         if content in seen_content:
-            # The released MuSiQue/PopQA corpora contain repeated copies of a
-            # handful of identical passages.  WARP/HippoRAG require unique
-            # content, and all such copies have the same evidence identity.
+            # The released MuSiQue corpus repeats a handful of identical
+            # passages. WARP/HippoRAG require unique content; copies share
+            # the same evidence identity.
             continue
         if doc_id in seen_ids:
             raise RuntimeError(f"{source_name}: document hash collision for {title!r}")
@@ -223,7 +222,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare the official HippoRAG2 release for WARP-G")
     parser.add_argument("--input-dir", type=Path, default=Path("data/raw/hipporag2"))
     parser.add_argument("--output-root", type=Path, default=Path("data/processed"))
-    parser.add_argument("--datasets", nargs="+", choices=sorted(DATASETS), default=sorted(DATASETS))
+    parser.add_argument(
+        "--datasets", nargs="+", choices=sorted(DATASETS),
+        default=["hotpotqa", "2wiki", "musique"],
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--folds", type=int, default=5)
     args = parser.parse_args()

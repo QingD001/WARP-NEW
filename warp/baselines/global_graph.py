@@ -1,8 +1,9 @@
-"""KET-RAG、G2ConS 的原生完整 pipeline。
+"""Native KET-RAG and G2ConS pipelines.
 
-KET-RAG 实现 KG skeleton + keyword bipartite retrieval；G2ConS 实现 concept graph +
-core-KG dual-path retrieval。两者的昂贵 KG 都调用与 WARP 相同的 HippoRAG2 builder。
-核心文档集按各自论文的篇数比例选取（默认 β=κ=0.8），不再套用 WARP token 预算。
+KET-RAG: KG skeleton + keyword bipartite retrieval. G2ConS: concept graph +
+core-KG dual-path retrieval. Both expensive KGs use the same HippoRAG2 builder
+as WARP. Core sets follow each paper's document fraction (default 0.8),
+not a WARP token budget.
 """
 
 from __future__ import annotations
@@ -176,7 +177,7 @@ class _ConceptResources:
 
 
 class GlobalBaselineFactory:
-    """一次构建 KET/G2ConS 轻量资源，并按各自原生 core 比例物化骨架图。"""
+    """Build shared KET/G2ConS lightweight resources, then each native core graph."""
 
     def __init__(self, documents: list[Document], base: HybridRetriever, graph_builder: GraphBuilder,
                  graph_retriever: GraphRetriever, reranker: Reranker, candidate_k: int,

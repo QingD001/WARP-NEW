@@ -1,4 +1,4 @@
-"""区域图成本的逐维聚合，以及按实际 tokens 计算的效率指标。"""
+"""Per-dimension graph-cost aggregation and token-efficiency metrics."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from warp.models import ConstructionCost
 
 
 def consumed_tokens(payload: dict[str, Any] | None) -> int:
-    """把 deployment / first-run / online 字典折成总消耗 tokens。"""
+    """Sum tokens from a deployment / first-run / online cost dict."""
     if not payload:
         return 0
     if "input_tokens" in payload or "embedding_tokens" in payload:
@@ -21,14 +21,14 @@ def consumed_tokens(payload: dict[str, Any] | None) -> int:
 
 
 def token_efficiency(quality: float, tokens: int) -> float | None:
-    """检索效果 / 总消耗 tokens；分母为 0 时无法定义。"""
+    """Quality per consumed token; undefined when tokens == 0."""
     if tokens <= 0:
         return None
     return float(quality) / float(tokens)
 
 
 def attach_token_efficiency(row: dict[str, Any], extra_online: int = 0) -> None:
-    """写入含/不含设计成本的实际 Token Efficiency。"""
+    """Attach token efficiency with and without design cost."""
     deployed = consumed_tokens(row.get("deployment_cost") or row.get("actual_construction_cost"))
     first_payload = row.get("first_run_cost_including_probe")
     first_run = consumed_tokens(first_payload) if first_payload else deployed
@@ -48,7 +48,7 @@ def attach_token_efficiency(row: dict[str, Any], extra_online: int = 0) -> None:
 
 
 def aggregate_costs(costs: list[ConstructionCost]) -> ConstructionCost:
-    """对 token、时间、图规模和存储分别求和。"""
+    """Sum tokens, wall time, graph size, and storage."""
     return ConstructionCost(
         input_tokens=sum(cost.input_tokens for cost in costs),
         output_tokens=sum(cost.output_tokens for cost in costs),

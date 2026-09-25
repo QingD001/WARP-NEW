@@ -1,4 +1,4 @@
-"""Construction、retrieval 与 QA 评测公开接口。"""
+"""Public construction, retrieval, and QA evaluation APIs."""
 
 from .construction_cost import aggregate_costs
 from .cutoffs import READER_TOP_K, RETRIEVAL_KS, metric_names
