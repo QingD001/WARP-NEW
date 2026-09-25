@@ -44,6 +44,8 @@ TOKEN_EFFICIENCY_KEYS = (
 )
 REGIONAL_METHODS = {"warp", "random_region", "frequency_only", "gain_only"}
 GLOBAL_METHODS = {"ket_rag", "g2cons"}
+BASE_RETRIEVERS = ("bm25", "dense", "hybrid")
+GRAPH_BASELINES = ("full_graph", "hipporag2")
 
 
 def _audited(call, **labels):
@@ -476,6 +478,28 @@ def _run_fold_experiment(
     unknown = set(methods) - REGIONAL_METHODS - GLOBAL_METHODS
     if unknown:
         raise ValueError(f"Unknown methods: {sorted(unknown)}")
+    raw_base_retrievers = experiment.get("base_retrievers", list(BASE_RETRIEVERS))
+    if raw_base_retrievers is None:
+        raw_base_retrievers = []
+    if not isinstance(raw_base_retrievers, list):
+        raise ValueError("experiment.base_retrievers must be a list")
+    base_retrievers = [str(value).lower() for value in raw_base_retrievers]
+    if len(set(base_retrievers)) != len(base_retrievers):
+        raise ValueError("experiment.base_retrievers must be unique")
+    unknown_base = set(base_retrievers) - set(BASE_RETRIEVERS)
+    if unknown_base:
+        raise ValueError(f"Unknown base retrievers: {sorted(unknown_base)}")
+    raw_graph_baselines = experiment.get("graph_baselines", list(GRAPH_BASELINES))
+    if raw_graph_baselines is None:
+        raw_graph_baselines = []
+    if not isinstance(raw_graph_baselines, list):
+        raise ValueError("experiment.graph_baselines must be a list")
+    graph_baselines = [str(value).lower() for value in raw_graph_baselines]
+    if len(set(graph_baselines)) != len(graph_baselines):
+        raise ValueError("experiment.graph_baselines must be unique")
+    unknown_graph = set(graph_baselines) - set(GRAPH_BASELINES)
+    if unknown_graph:
+        raise ValueError(f"Unknown graph baselines: {sorted(unknown_graph)}")
     design_seed = int(experiment["seed"])
 
     if not bundle.test:
@@ -545,7 +569,7 @@ def _run_fold_experiment(
                     )
             reader_done.add(method)
 
-        for method in ("bm25", "dense", "hybrid"):
+        for method in base_retrievers:
             before = graph_retriever.stats()
             metrics = _audited(lambda: model.evaluate_base(bundle.test, method, evaluation_ks), method=method, stage="test")
             online = graph_retriever.delta(before)
@@ -637,58 +661,70 @@ def _run_fold_experiment(
                                  if key not in {"per_query", "retrieval_traces", "retrieved_doc_ids",
                                                 "ranked_results", "multistep"}})
 
-        before = graph_retriever.stats()
-        full_metrics = _audited(lambda: model.evaluate_full_graph(bundle.test, evaluation_ks), method="full_graph", stage="test")
-        full_online = graph_retriever.delta(before)
         for pending_method, pending_metrics in list(pending_readers.items()):
             maybe_reader(pending_method, pending_metrics)
         pending_readers.clear()
-        maybe_reader("full_graph", full_metrics)
-        full_metrics = _attach_multistep(
-            full_metrics, method="full_graph",
-            search_trace=_trace_search(lambda query, k, trace: model._search_full_graph_once(query, k, trace=trace)),
-            model=model, queries=bundle.test, log_dir=multistep_dir, documents=bundle.documents,
-        )
-        before = graph_retriever.stats()
-        graph_metrics = _audited(lambda: model.evaluate_full_graph_only(bundle.test, evaluation_ks), method="hipporag2", stage="test")
-        graph_online = graph_retriever.delta(before)
-        maybe_reader("hipporag2", graph_metrics)
-        graph = model.materialize_full_graph()
-        graph_metrics = _attach_multistep(
-            graph_metrics, method="hipporag2",
-            search_trace=_trace_search(lambda query, k, trace, graph=graph: fuse_and_rerank(
-                query, [model.graph_retriever.search(query, graph, model.config.candidate_k)],
-                model.reranker, k=k, candidate_k=model.config.candidate_k,
-                source="hipporag2_reranked", trace=trace,
-            )),
-            model=model, queries=bundle.test, log_dir=multistep_dir, documents=bundle.documents,
-        )
-        full_cost = model.full_graph.cost
-        baseline_trials.extend([
-            {"design_seed": design_seed, "fold": fold, "method": "hipporag2", "online_retrieval_cost": graph_online,
-             "actual_construction_cost": full_cost.to_dict(), **graph_metrics},
-            {"design_seed": design_seed, "fold": fold, "method": "full_graph", "online_retrieval_cost": full_online,
-             "actual_construction_cost": full_cost.to_dict(), **full_metrics},
-        ])
-        denominator_tokens = full_cost.selection_cost
-        denominator_usd = full_cost.estimated_usd
+
+        if "full_graph" in graph_baselines:
+            before = graph_retriever.stats()
+            full_metrics = _audited(lambda: model.evaluate_full_graph(bundle.test, evaluation_ks), method="full_graph", stage="test")
+            full_online = graph_retriever.delta(before)
+            maybe_reader("full_graph", full_metrics)
+            full_metrics = _attach_multistep(
+                full_metrics, method="full_graph",
+                search_trace=_trace_search(lambda query, k, trace: model._search_full_graph_once(query, k, trace=trace)),
+                model=model, queries=bundle.test, log_dir=multistep_dir, documents=bundle.documents,
+            )
+        if "hipporag2" in graph_baselines:
+            before = graph_retriever.stats()
+            graph_metrics = _audited(lambda: model.evaluate_full_graph_only(bundle.test, evaluation_ks), method="hipporag2", stage="test")
+            graph_online = graph_retriever.delta(before)
+            maybe_reader("hipporag2", graph_metrics)
+            graph = model.materialize_full_graph()
+            graph_metrics = _attach_multistep(
+                graph_metrics, method="hipporag2",
+                search_trace=_trace_search(lambda query, k, trace, graph=graph: fuse_and_rerank(
+                    query, [model.graph_retriever.search(query, graph, model.config.candidate_k)],
+                    model.reranker, k=k, candidate_k=model.config.candidate_k,
+                    source="hipporag2_reranked", trace=trace,
+                )),
+                model=model, queries=bundle.test, log_dir=multistep_dir, documents=bundle.documents,
+            )
+        if "full_graph" in graph_baselines or "hipporag2" in graph_baselines:
+            full_cost = model.materialize_full_graph().cost
+            if "hipporag2" in graph_baselines:
+                baseline_trials.append(
+                    {"design_seed": design_seed, "fold": fold, "method": "hipporag2", "online_retrieval_cost": graph_online,
+                     "actual_construction_cost": full_cost.to_dict(), **graph_metrics},
+                )
+            if "full_graph" in graph_baselines:
+                baseline_trials.append(
+                    {"design_seed": design_seed, "fold": fold, "method": "full_graph", "online_retrieval_cost": full_online,
+                     "actual_construction_cost": full_cost.to_dict(), **full_metrics},
+                )
+            denominator_tokens = full_cost.selection_cost
+            denominator_usd = full_cost.estimated_usd
+        else:
+            denominator_tokens = float(model.full_graph_cost)
+            denominator_usd = 0.0
         if denominator_tokens <= 0:
             raise ValueError("Full graph construction token cost must be positive")
         for row in seed_rows:
             deployed = row["deployment_cost"]
             first_run = row["first_run_cost_including_probe"]
-            hybrid = next(trial for trial in baseline_trials if trial["method"] == "hybrid")
-            delta_ce = row["complete_evidence@10"] - hybrid["complete_evidence@10"]
-            net_completed = delta_ce * row["num_queries"]
-            deployed_tokens = deployed["input_tokens"] + deployed["output_tokens"] + deployed["embedding_tokens"]
-            first_tokens = first_run["input_tokens"] + first_run["output_tokens"] + first_run["embedding_tokens"]
-            row["incremental_efficiency"] = {
-                "reference": "hybrid", "delta_complete_evidence@10": delta_ce,
-                "net_completed_queries": net_completed,
-                "net_completed_queries_per_million_deployment_tokens": net_completed * 1e6 / deployed_tokens if deployed_tokens else None,
-                "net_completed_queries_per_million_first_run_tokens": net_completed * 1e6 / first_tokens if first_tokens else None,
-                "cost_scope": "logical input + output + estimated embedding tokens; online retrieval and QA reported separately",
-            }
+            hybrid = next((trial for trial in baseline_trials if trial["method"] == "hybrid"), None)
+            if hybrid is not None:
+                delta_ce = row["complete_evidence@10"] - hybrid["complete_evidence@10"]
+                net_completed = delta_ce * row["num_queries"]
+                deployed_tokens = deployed["input_tokens"] + deployed["output_tokens"] + deployed["embedding_tokens"]
+                first_tokens = first_run["input_tokens"] + first_run["output_tokens"] + first_run["embedding_tokens"]
+                row["incremental_efficiency"] = {
+                    "reference": "hybrid", "delta_complete_evidence@10": delta_ce,
+                    "net_completed_queries": net_completed,
+                    "net_completed_queries_per_million_deployment_tokens": net_completed * 1e6 / deployed_tokens if deployed_tokens else None,
+                    "net_completed_queries_per_million_first_run_tokens": net_completed * 1e6 / first_tokens if first_tokens else None,
+                    "cost_scope": "logical input + output + estimated embedding tokens; online retrieval and QA reported separately",
+                }
             row["actual_cost_fraction"] = (
                 deployed["input_tokens"] + deployed["output_tokens"] + deployed["embedding_tokens"]
             ) / denominator_tokens

@@ -125,8 +125,13 @@ def _start_run(args: argparse.Namespace, batch: int, dtype: str) -> int:
         f"batch={batch} dtype={dtype} ====\n"
     )
     handle.flush()
+    command = [
+        args.python, "-u", "-m", "warp.run",
+        "--config", str(args.config), "--output", str(args.output),
+        *list(args.run_arg or []),
+    ]
     proc = subprocess.Popen(
-        [args.python, "-u", "-m", "warp.run", "--config", str(args.config), "--output", str(args.output)],
+        command,
         cwd=str(args.cwd),
         env=env,
         stdout=handle,
@@ -148,6 +153,10 @@ def main() -> int:
     parser.add_argument("--interval", type=float, default=20.0)
     parser.add_argument("--max-restarts", type=int, default=4)
     parser.add_argument("--state", type=Path)
+    parser.add_argument(
+        "--run-arg", action="append", default=[],
+        help="Extra arguments forwarded to warp.run on OOM restart, e.g. --run-arg --max-folds --run-arg 1",
+    )
     args = parser.parse_args()
     state_path = args.state or args.output.with_name("oom-watch.json")
     state = _load_state(state_path, {
