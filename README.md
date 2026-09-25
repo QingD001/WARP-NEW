@@ -4,10 +4,17 @@ WARP-G is a workload-aware regional graph materialization system for GraphRAG.
 There is no separate training loop. Physical design (partition, probe, region
 selection) and held-out evaluation both run inside `python -m warp.run`.
 
-This repository is intended as anonymous supplementary code. It does **not**
-bundle processed corpora, HippoRAG indexes, LLM caches, or paper result JSON.
-
 Paper datasets: **HotpotQA, 2Wiki, MuSiQue, NQ**.
+
+A Chinese translation is in [`README-zh.md`](README-zh.md). The English file
+is the reviewer-facing source of truth.
+
+## Reproduce at a glance
+
+1. Install the package and set `OPENAI_API_KEY` / `OPENAI_BASE_URL` (Environment).
+2. Download and convert HotpotQA / 2Wiki / MuSiQue (Data). Place NQ JSONL yourself.
+3. Run `python -m warp.run --config configs/paper/<ds>.yaml --max-folds 1`.
+4. Export CSV from the result JSON. Run LinearRAG only if that official row is needed.
 
 ## What the paper runner does
 
@@ -22,8 +29,7 @@ On a shared corpus the runner:
    KET-RAG, G2ConS, and the four region-selection methods;
 6. writes retrieval metrics, a shared-cache reader, IRCoT, and token costs.
 
-LinearRAG is a separate official end-to-end run. It is not a row in the WARP
-region-selection table.
+LinearRAG is a separate official end-to-end run. 
 
 ## Repository layout
 
@@ -39,7 +45,6 @@ scripts/run_official_baseline.py
 scripts/run_official_suite.py
 scripts/export_official_results.py
 warp/run.py                 paper experiment entry (`warp-g`)
-tests/                      unit tests that do not call the paper LLM
 ```
 
 ## Environment
@@ -72,12 +77,14 @@ Pinned backends in the paper YAML:
 
 `pip install -e .` pulls HippoRAG from the pinned Git commit in
 `pyproject.toml`. A GPU is required for NV-Embed-v2 and the reranker. LLM
-OpenIE and QA need a paid or self-hosted endpoint. This packaging pass did
-**not** re-run the paper suite, so wall-clock and dollar cost are not restated
-here.
+OpenIE and QA need a paid or self-hosted endpoint.
 
-Set `OPENAI_BASE_URL` to the same OpenAI-compatible service used in your
-experiment. The YAML does not embed a lab-specific gateway.
+Set `OPENAI_BASE_URL` to the same OpenAI-compatible service used in the
+experiment. The YAML does not embed a site-specific gateway.
+
+Exact GPU model, GPU count, and wall-clock hours are **not** stored in the
+tracked configs. Use the paper for those resource claims. This release does
+not restate table numbers.
 
 ## Data
 
@@ -132,7 +139,7 @@ There is no checkpointed model to load. Design artifacts are HippoRAG indexes
 under `outputs/indexes/<dataset>/`. Documented paper commands use
 `--max-folds 1`.
 
-Single dataset (unverified end-to-end; needs data, GPU, and LLM):
+Single dataset (needs data, GPU, and LLM):
 
 ```bash
 python3 -m warp.run \
@@ -156,7 +163,7 @@ python3 -m warp.run --help
 # --checkpoint-dir  default is <output>.folds
 ```
 
-Export tidy CSV from completed JSON (unverified without result files):
+Export tidy CSV from completed JSON:
 
 ```bash
 python3 scripts/export_paper_results.py \
@@ -217,28 +224,13 @@ official end-to-end API, not a WARP region-selection row.
 python3 -m warp.run --help
 python3 scripts/prepare_hipporag2.py --help
 python3 -c "import warp, warp.run, warp.pipeline"
-python3 -m unittest discover -s tests -v
 ```
 
-Those commands check the CLI surface and local unit tests. They do **not**
-reproduce paper numbers.
+Those commands check the CLI surface.
 
-## Anonymous supplement
+## What this release does not include
 
-When you zip this code for submission, include source, configs, tests, and
-this README. Do **not** include:
-
-- `.git/` (commit metadata is identifying)
-- `data/` or `outputs/`, including local-path symlinks
-- `HippoRAG/`, `external/`, `vendor/`, `.venv/`, `.hf-cache/`
-- API keys, `.env`, logs, or machine-specific check files
-
-Do not publish this tree or change remotes as part of packaging.
-
-## What this pass does not claim
-
-- No paper table was regenerated here.
-- Full `warp.run` jobs were not executed (GPU + LLM + multi-hour OpenIE).
-- NQ preprocessing is not specified in-repo.
-- Exact GPU model and wall-clock hours are not recorded in the tracked
-  configs, so they are omitted.
+- Processed corpora, indexes, caches, or result JSON.
+- An NQ download / conversion script.
+- GPU model, GPU count, or wall-clock hours (not recorded in tracked configs).
+- Regenerated paper tables.

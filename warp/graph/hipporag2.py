@@ -53,7 +53,7 @@ class HippoRAG2Config:
 
     artifact_root: str = "outputs/hipporag2"
     dataset: str | None = None
-    llm_name: str = "gpt-4o-mini"
+    llm_name: str = "deepseek-v4-flash"
     llm_base_url: str | None = "https://api.openai.com/v1"
     disable_llm_thinking: bool = False
     embedding_model_name: str = "nvidia/NV-Embed-v2"
