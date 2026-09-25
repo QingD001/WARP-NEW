@@ -30,7 +30,7 @@ LinearRAG 是单独的官方端到端实验，不是 WARP 选区表里的一行�
 
 ```text
 configs/paper/              主表 YAML
-configs/ablations/          可选的方法 / 探测比例 YAML
+configs/ablations/          探测比例 40% 的 YAML
 configs/official_baselines.yaml
 scripts/prepare_hipporag2.py
 scripts/run_paper_suite.py
@@ -157,7 +157,7 @@ python3 scripts/export_paper_results.py \
 | 主检索 / reader / 成本表 | `python -m warp.run --config configs/paper/<ds>.yaml --max-folds 1` | `configs/paper/{hotpotqa,2wiki,musique,nq}.yaml` |
 | 四数据集套件 | `python3 scripts/run_paper_suite.py` | 同上四个 YAML |
 | 分区消融 | 写在论文 YAML 的 `partition_ablations.modes` | query / semantic / random |
-| 探测比例 40%（仅 WARP + 对照） | `python -m warp.run --config configs/ablations/<ds>/probe40-warp.yaml --max-folds 1 --skip-multistep` | NQ 与 HotpotQA |
+| 探测比例 40%（仅 WARP + 对照） | `python -m warp.run --config configs/ablations/<ds>/probe40-warp.yaml --max-folds 1 --skip-multistep` | `configs/ablations/{hotpotqa,2wiki,musique,nq}/probe40-warp.yaml` |
 | LinearRAG | 先 `python3 scripts/prepare_official_baselines.py`，再 `python3 scripts/run_official_suite.py` | `configs/official_baselines.yaml` |
 | 官方 EM/F1 CSV | `python3 scripts/export_official_results.py` | `outputs/official/` |
 

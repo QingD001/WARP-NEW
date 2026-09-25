@@ -1,7 +1,12 @@
+# Musique fold-0 ablation: probe_fraction 0.2 → 0.4.
+# Compare WARP@40% against Random-region / Frequency-only / Gain-only.
+# No KET/G2ConS, no BM25/Dense/Hybrid/Full Graph/HippoRAG2 test eval,
+# no partition-mode ablations, no IRCoT. Reader stays WARP-only
+# (same as the paper reader table). Reuse outputs/indexes/musique.
 dataset:
-  name: hotpotqa
-  corpus: data/processed/hotpotqa/corpus.jsonl
-  queries: data/processed/hotpotqa/queries.jsonl
+  name: musique
+  corpus: data/processed/musique/corpus.jsonl
+  queries: data/processed/musique/queries.jsonl
 warp:
   retrieval_k: 10
   candidate_k: 50
@@ -9,10 +14,10 @@ warp:
   coaccess_k: 20
   semantic_k: 5
   semantic_lambda: 0.05
-  probe_fraction: 0.2
+  probe_fraction: 0.4
   probe_max_queries: 64
   gain_prior_queries: 16.0
-  benefit_objective: complete_evidence
+  benefit_objective: mixed
   complete_weight: 0.5
   selection_mode: conditional
   conditional_max_queries: 32
@@ -28,8 +33,10 @@ warp:
   partition_mode: combined
   min_region_size: 5
   seed: 42
+  retrieval_ks: [2, 3, 5, 10]
+  multistep_max_steps: 3
 graph:
-  artifact_root: outputs/indexes/hotpotqa
+  artifact_root: outputs/indexes/musique
   llm_name: deepseek-v4-flash
   disable_llm_thinking: true
   embedding_model_name: nvidia/NV-Embed-v2
@@ -43,7 +50,7 @@ graph:
   synonymy_edge_sim_threshold: 0.8
   graph_type: facts_and_sim_passage_node_unidirectional
   input_usd_per_million_tokens: 0.15
-  output_usd_per_million_tokens: 0.6
+  output_usd_per_million_tokens: 0.60
 reranker:
   model_name: BAAI/bge-reranker-v2-m3
   revision: b5160aeac3c6c8fe7beaaaf04c9e0142826b58d1
@@ -52,28 +59,22 @@ reranker:
 experiment:
   cross_fitting_folds: 5
   methods:
-  - ket_rag
-  - g2cons
+  - warp
   - random_region
   - frequency_only
   - gain_only
-  - warp
   ket_core_fraction: 0.8
   g2_core_fraction: 0.8
   seed: 42
   randomization_samples: 10000
+  base_retrievers: []
+  graph_baselines: []
   partition_ablations:
     modes: []
     seed: 42
 reader:
   enabled: true
   top_k: 5
+  repeats: 3
   methods:
-  - bm25
-  - dense
-  - hybrid
-  - hipporag2
-  - full_graph
-  - ket_rag
-  - g2cons
   - warp

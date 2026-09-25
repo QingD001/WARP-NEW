@@ -35,7 +35,7 @@ LinearRAG is a separate official end-to-end run.
 
 ```text
 configs/paper/              main-table YAML
-configs/ablations/          optional method / probe-fraction YAML
+configs/ablations/          probe-fraction 40% YAML
 configs/official_baselines.yaml
 scripts/prepare_hipporag2.py
 scripts/run_paper_suite.py
@@ -178,7 +178,7 @@ python3 scripts/export_paper_results.py \
 | Main retrieval / reader / cost table | `python -m warp.run --config configs/paper/<ds>.yaml --max-folds 1` | `configs/paper/{hotpotqa,2wiki,musique,nq}.yaml` |
 | Four-dataset suite | `python3 scripts/run_paper_suite.py` | same four YAML files |
 | Partition ablations | included in the paper YAML (`partition_ablations.modes`) | query / semantic / random |
-| Probe-fraction 40% (WARP + controls only) | `python -m warp.run --config configs/ablations/<ds>/probe40-warp.yaml --max-folds 1 --skip-multistep` | NQ and HotpotQA |
+| Probe-fraction 40% (WARP + controls only) | `python -m warp.run --config configs/ablations/<ds>/probe40-warp.yaml --max-folds 1 --skip-multistep` | `configs/ablations/{hotpotqa,2wiki,musique,nq}/probe40-warp.yaml` |
 | LinearRAG | `python3 scripts/prepare_official_baselines.py` then `python3 scripts/run_official_suite.py` | `configs/official_baselines.yaml` |
 | Official EM/F1 CSV | `python3 scripts/export_official_results.py` | `outputs/official/` |
 
